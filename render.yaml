@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: rahlah-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/vehicles
+    envVars:
+      - key: SUPERVISOR_USERNAME
+        sync: false
+      - key: SUPERVISOR_PASSWORD
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
