@@ -7,6 +7,8 @@ services:
     startCommand: npm start
     healthCheckPath: /api/vehicles
     envVars:
+      - key: DATABASE_URL
+        sync: false
       - key: SUPERVISOR_USERNAME
         sync: false
       - key: SUPERVISOR_PASSWORD

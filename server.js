@@ -45,14 +45,20 @@ const supervisorAuth = makeAccountKit({
 
 // Bootstrap exactly one supervisor account on first run — there's no sign-up
 // flow for this role on purpose, so ops can't self-provision a dashboard login.
-if (Object.keys(state.supervisors).length === 0) {
-  const username = process.env.SUPERVISOR_USERNAME || 'admin';
-  const password = process.env.SUPERVISOR_PASSWORD || require('crypto').randomBytes(6).toString('hex');
-  const id = randomUUID();
-  state.supervisors[id] = { id, username, name: 'Supervisor', passwordHash: hashPassword(password), createdAt: Date.now() };
-  db.save();
-  console.log(`Bootstrapped a supervisor account — username: ${username}  password: ${password}`);
-  console.log('(set SUPERVISOR_USERNAME / SUPERVISOR_PASSWORD env vars to control these instead)');
+// This runs inside main() below, AFTER db.ready resolves — bootstrapping it
+// here at require-time would race a Postgres load and could get wiped out
+// (or, worse, briefly serve requests against an incomplete snapshot) if a
+// request came in before the real persisted state finished loading.
+function bootstrapSupervisorIfNeeded() {
+  if (Object.keys(state.supervisors).length === 0) {
+    const username = process.env.SUPERVISOR_USERNAME || 'admin';
+    const password = process.env.SUPERVISOR_PASSWORD || require('crypto').randomBytes(6).toString('hex');
+    const id = randomUUID();
+    state.supervisors[id] = { id, username, name: 'Supervisor', passwordHash: hashPassword(password), createdAt: Date.now() };
+    db.save();
+    console.log(`Bootstrapped a supervisor account — username: ${username}  password: ${password}`);
+    console.log('(set SUPERVISOR_USERNAME / SUPERVISOR_PASSWORD env vars to control these instead)');
+  }
 }
 
 const app = express();
@@ -509,8 +515,15 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
 wss.on('connection', () => {});
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Rahlah backend API running → http://localhost:${PORT}`);
-  console.log(`  This repo is API-only — customer.html/captain.html/supervisor.html`);
-  console.log(`  live in their own repos and point RAHLAH_API_BASE at this server.`);
-});
+
+async function main() {
+  await db.ready; // don't accept any traffic until real persisted state (if any) has loaded
+  bootstrapSupervisorIfNeeded();
+  server.listen(PORT, () => {
+    console.log(`Rahlah backend API running → http://localhost:${PORT}`);
+    console.log(`  This repo is API-only — customer.html/captain.html/supervisor.html`);
+    console.log(`  live in their own repos and point RAHLAH_API_BASE at this server.`);
+    console.log(`  Storage: ${db.isUsingPostgres() ? 'Postgres' : 'local JSON file (data/db.json) — set DATABASE_URL for real persistence'}`);
+  });
+}
+main();

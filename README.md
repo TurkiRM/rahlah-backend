@@ -28,9 +28,34 @@ resetting the account file.
 server.js         Express + WebSocket server, all the API routes
 matching.js       The seat/gender rules — the ONE place this logic lives
 auth.js           Shared account/session/password-hashing kit (captain, customer, supervisor)
-db.js             Tiny JSON-file persistence (data/db.json)
+db.js             Persistence — Postgres if DATABASE_URL is set, else a local JSON file
 push.js           Web Push (VAPID) for off-duty captain notifications
 ```
+
+## Storage: set DATABASE_URL once real accounts exist
+
+Without `DATABASE_URL`, this falls back to `data/db.json` on local disk — fine for
+development, but **data doesn't survive a restart on a host with an ephemeral filesystem**
+(Render's free tier, for one). Once real captains and customers are signing up, set
+`DATABASE_URL` to a Postgres connection string and everything (accounts, sessions, trip
+history, active cars) survives restarts and redeploys instead.
+
+This was tested directly, not just written: a captain account was registered, the process
+was fully killed (simulating a Render restart), and the same account logged in successfully
+after the process came back up, loading straight from Postgres.
+
+The whole app state is stored as a single JSON blob in one `app_state` table — not a full
+relational schema. That's a deliberate tradeoff: `matching.js` and `server.js` are built
+around simple in-memory object mutation, and rewriting every operation into individual SQL
+queries would be a much larger, riskier change for a small operation like this one. This
+gets you real durability without that rewrite. Move to a proper relational schema once you
+need things a JSON blob can't do well — ad-hoc SQL reporting, multiple server instances
+reading/writing concurrently, or a dataset too large to load into memory in one piece.
+
+**Where to get a free Postgres database:** Render's own free Postgres tier expires 30 days
+after creation. [Neon](https://neon.tech) and [Supabase](https://supabase.com) both offer
+Postgres with an always-free tier that doesn't expire — either works fine here, just copy
+the connection string they give you into `DATABASE_URL`.
 
 ## Accounts
 

@@ -36,11 +36,27 @@ Go to [render.com](https://render.com), sign up/log in, then:
 (If you'd rather not use the blueprint: **New +** → **Web Service** → pick the repo →
 Build Command `npm install` → Start Command `npm start` → Free plan. Same result.)
 
-## 3. Set the environment variables
+## 3. Set up Postgres (do this before real people sign up)
+
+Without this, captain/customer accounts live in a JSON file that gets wiped on every
+restart — fine for a first test, not once real accounts exist. Both of these have a
+free tier that doesn't expire (unlike Render's own free Postgres, which expires after
+30 days):
+
+- **[Neon](https://neon.tech)** — sign up, create a project, copy the connection string
+  it gives you (starts with `postgresql://`).
+- **[Supabase](https://supabase.com)** — sign up, create a project, find the connection
+  string under Project Settings → Database.
+
+Either way, you end up with one connection string. That's your `DATABASE_URL`.
+
+## 4. Set the environment variables
 
 Render will prompt for the variables listed in `render.yaml` since they're marked
 `sync: false` (meaning: don't commit a value, ask for it). Use these:
 
+- **DATABASE_URL** — the connection string from step 3. Leave blank only if you're just
+  kicking the tires and don't mind losing data on restart.
 - **SUPERVISOR_USERNAME** / **SUPERVISOR_PASSWORD** — pick your own. This is the one
   supervisor account, bootstrapped on first boot. If you leave `SUPERVISOR_PASSWORD`
   blank, one gets generated and printed to the Render logs instead — set it explicitly so
