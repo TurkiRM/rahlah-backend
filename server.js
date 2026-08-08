@@ -126,6 +126,7 @@ function assignCarToCaptain(car, captain) {
   car.captainId = captain.id;
   car.captainName = captain.name;
   car.captainPlate = captain.plate;
+  car.captainPhone = captain.phone;
   car.status = 'ready';
   captain.currentCarId = car.id;
 }
@@ -165,7 +166,14 @@ function creditCustomersOnCompletion(car) {
       mode: car.mode,
       seats: Array.isArray(b.seats) ? b.seats.length : totalSeats(car.vehicleType),
       fare: b.fare,
+      startedAt: car.startedAt || null,
       completedAt: car.completedAt,
+      // Captain identity on the customer's own record — who they actually rode with,
+      // the core safety-relevant piece of a trip history.
+      captainId: car.captainId || null,
+      captainName: car.captainName || null,
+      captainPlate: car.captainPlate || null,
+      captainPhone: car.captainPhone || null,
     });
     if (cust.activeCarId === car.id) cust.activeCarId = null;
   });
@@ -443,6 +451,7 @@ app.post('/api/captain/start-trip', captainAuth.requireAuth, (req, res) => {
   const car = state.cars[req.account.currentCarId];
   if (!car) return res.status(404).json({ error: 'No active car for this captain.' });
   car.status = 'in_trip';
+  car.startedAt = Date.now();
   db.save();
   broadcastCar(car);
   res.json({ car });
@@ -457,10 +466,26 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
   car.status = 'completed';
   car.completedAt = Date.now();
   captain.earnings += fare;
+
+  // Passenger list on the CAPTAIN's own record — who was actually in the car, the
+  // core safety-relevant piece if something needs to be looked into afterward.
+  const passengers = (car.bookings || []).map((b) => {
+    const cust = state.customers[b.customerId];
+    return {
+      customerId: b.customerId,
+      name: cust ? cust.name : 'Unknown',
+      phone: cust ? cust.phone : null,
+      gender: cust ? cust.gender : null,
+      seats: Array.isArray(b.seats) ? b.seats.length : totalSeats(car.vehicleType),
+    };
+  });
+
   const tripRecord = {
     id: car.id, vehicleType: car.vehicleType, direction: car.direction, mode: car.mode,
     seats: car.mode === 'private' ? totalSeats(car.vehicleType) : seatsFilled(car),
-    fare, completedAt: car.completedAt,
+    fare, startedAt: car.startedAt || null, completedAt: car.completedAt,
+    captainId: captain.id, captainName: captain.name, captainPlate: captain.plate,
+    passengers,
   };
   captain.tripHistory.unshift(tripRecord);
   state.trips.unshift(tripRecord);
