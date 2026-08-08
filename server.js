@@ -29,7 +29,7 @@ const captainAuth = makeAccountKit({
   accountsKey: 'captains',
   sessionsKey: 'captainSessions',
   loginField: 'phone',
-  publicFields: ['id', 'phone', 'name', 'plate', 'vehicleType', 'direction', 'status', 'currentCarId', 'earnings', 'tripHistory', 'createdAt'],
+  publicFields: ['id', 'phone', 'name', 'plate', 'vehicleType', 'direction', 'status', 'currentCarId', 'earnings', 'tripHistory', 'location', 'createdAt'],
 });
 const customerAuth = makeAccountKit({
   accountsKey: 'customers',
@@ -355,7 +355,7 @@ app.post('/api/captain/register', (req, res) => {
   const account = {
     id, phone, passwordHash: hashPassword(password), name, plate,
     vehicleType: null, direction: null, status: 'offline', currentCarId: null,
-    earnings: 0, tripHistory: [], createdAt: Date.now(),
+    earnings: 0, tripHistory: [], location: null, createdAt: Date.now(),
   };
   state.captains[id] = account;
   db.save();
@@ -477,6 +477,23 @@ app.post('/api/captain/offline', captainAuth.requireAuth, (req, res) => {
   captain.status = 'offline';
   captain.currentCarId = null;
   db.save();
+  res.json({ ok: true });
+});
+
+app.post('/api/captain/location', captainAuth.requireAuth, (req, res) => {
+  const { lat, lng } = req.body || {};
+  if (typeof lat !== 'number' || typeof lng !== 'number') return res.status(400).json({ error: 'lat and lng (numbers) are required.' });
+  const captain = req.account;
+  captain.location = { lat, lng, updatedAt: Date.now() };
+  // Deliberately NOT calling db.save() here — GPS pings arrive every few
+  // seconds per active captain, and this data is fine to lose on a restart
+  // (the next ping repopulates it within seconds). Persisting every single
+  // ping to Postgres would be pure write amplification for no real benefit.
+  const car = captain.currentCarId ? state.cars[captain.currentCarId] : null;
+  if (car) {
+    car.captainLocation = captain.location;
+    broadcastCar(car);
+  }
   res.json({ ok: true });
 });
 
