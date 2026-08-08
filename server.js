@@ -3,6 +3,8 @@ const cors = require('cors');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const { randomUUID } = require('crypto');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
 
 const {
   VEHICLES,
@@ -15,6 +17,7 @@ const {
 } = require('./matching');
 const db = require('./db');
 const push = require('./push');
+const files = require('./files');
 const { hashPassword, checkPassword, makeAccountKit } = require('./auth');
 const { POINTS } = require('./points');
 
@@ -29,13 +32,13 @@ const captainAuth = makeAccountKit({
   accountsKey: 'captains',
   sessionsKey: 'captainSessions',
   loginField: 'phone',
-  publicFields: ['id', 'phone', 'name', 'plate', 'vehicleType', 'direction', 'status', 'currentCarId', 'earnings', 'tripHistory', 'location', 'createdAt'],
+  publicFields: ['id', 'phone', 'name', 'plate', 'vehicleType', 'direction', 'status', 'currentCarId', 'earnings', 'tripHistory', 'location', 'accountStatus', 'documents', 'rejectionReason', 'createdAt'],
 });
 const customerAuth = makeAccountKit({
   accountsKey: 'customers',
   sessionsKey: 'customerSessions',
   loginField: 'phone',
-  publicFields: ['id', 'phone', 'name', 'gender', 'activeCarId', 'tripHistory', 'createdAt'],
+  publicFields: ['id', 'phone', 'name', 'gender', 'activeCarId', 'tripHistory', 'accountStatus', 'createdAt'],
 });
 const supervisorAuth = makeAccountKit({
   accountsKey: 'supervisors',
@@ -227,7 +230,7 @@ app.post('/api/customer/register', (req, res) => {
   if (!['men', 'women'].includes(gender)) return res.status(400).json({ error: 'Gender must be specified.' });
   if (customerAuth.findByLogin(phone)) return res.status(409).json({ error: 'An account with this phone number already exists.' });
   const id = randomUUID();
-  const account = { id, phone, passwordHash: hashPassword(password), name, gender, activeCarId: null, tripHistory: [], createdAt: Date.now() };
+  const account = { id, phone, passwordHash: hashPassword(password), name, gender, activeCarId: null, tripHistory: [], accountStatus: 'active', createdAt: Date.now() };
   state.customers[id] = account;
   db.save();
   const token = customerAuth.createSession(id);
@@ -249,6 +252,7 @@ app.get('/api/customer/me', customerAuth.requireAuth, (req, res) => {
 });
 
 app.post('/api/book', customerAuth.requireAuth, (req, res) => {
+  if (req.account.accountStatus === 'suspended') return res.status(403).json({ error: 'Your account has been suspended. Contact support.' });
   const { vehicleType, direction, party } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
   if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
@@ -310,6 +314,7 @@ app.post('/api/book/:carId/cancel', customerAuth.requireAuth, (req, res) => {
 });
 
 app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
+  if (req.account.accountStatus === 'suspended') return res.status(403).json({ error: 'Your account has been suspended. Contact support.' });
   const { vehicleType, direction } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
   if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
@@ -355,7 +360,11 @@ app.post('/api/captain/register', (req, res) => {
   const account = {
     id, phone, passwordHash: hashPassword(password), name, plate,
     vehicleType: null, direction: null, status: 'offline', currentCarId: null,
-    earnings: 0, tripHistory: [], location: null, createdAt: Date.now(),
+    earnings: 0, tripHistory: [], location: null,
+    accountStatus: 'documents_needed',
+    documents: { license: null, vehicleRegistration: null, insurance: null, inspection: null, photo: null },
+    rejectionReason: null,
+    createdAt: Date.now(),
   };
   state.captains[id] = account;
   db.save();
@@ -383,6 +392,15 @@ app.post('/api/captain/online', captainAuth.requireAuth, (req, res) => {
   const { vehicleType, direction } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
   if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  if (req.account.accountStatus !== 'active') {
+    const messages = {
+      documents_needed: 'Upload your documents before going online.',
+      pending_review: 'Your documents are still being reviewed — you can\'t go online yet.',
+      rejected: `Your account was not approved${req.account.rejectionReason ? ': ' + req.account.rejectionReason : '.'}`,
+      suspended: 'Your account has been suspended. Contact support.',
+    };
+    return res.status(403).json({ error: messages[req.account.accountStatus] || 'Your account cannot go online right now.' });
+  }
 
   const captain = req.account;
   captain.vehicleType = vehicleType;
@@ -480,6 +498,45 @@ app.post('/api/captain/offline', captainAuth.requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+const DOC_TYPES = ['license', 'vehicleRegistration', 'insurance', 'inspection', 'photo'];
+const DOC_UPLOAD_FIELDS = DOC_TYPES.map((name) => ({ name, maxCount: 1 }));
+
+app.post('/api/captain/documents', captainAuth.requireAuth, upload.fields(DOC_UPLOAD_FIELDS), async (req, res) => {
+  const captain = req.account;
+  try {
+    for (const docType of DOC_TYPES) {
+      const fileArr = req.files && req.files[docType];
+      if (!fileArr || !fileArr.length) continue; // allow uploading a subset / re-uploading one at a time
+      const file = fileArr[0];
+      const oldId = captain.documents[docType];
+      const newId = await files.saveDocument(captain.id, docType, file.mimetype, file.buffer);
+      captain.documents[docType] = newId;
+      if (oldId) files.deleteDocument(oldId).catch(() => {}); // best-effort cleanup of the replaced file
+    }
+  } catch (err) {
+    if (err.code === 'FILE_TOO_LARGE') return res.status(413).json({ error: err.message });
+    console.error('Document upload failed:', err.message);
+    return res.status(500).json({ error: 'Could not save one or more documents. Try again.' });
+  }
+
+  const allPresent = DOC_TYPES.every((t) => captain.documents[t]);
+  if (allPresent && (captain.accountStatus === 'documents_needed' || captain.accountStatus === 'rejected')) {
+    captain.accountStatus = 'pending_review';
+    captain.rejectionReason = null;
+  }
+  db.save();
+  res.json({ captain: captainAuth.toPublic(captain) });
+});
+
+app.get('/api/captain/document/:docType', captainAuth.requireAuth, async (req, res) => {
+  const fileId = req.account.documents[req.params.docType];
+  if (!fileId) return res.status(404).json({ error: 'Not uploaded yet.' });
+  const doc = await files.getDocument(fileId);
+  if (!doc) return res.status(404).json({ error: 'File not found.' });
+  res.set('Content-Type', doc.mimeType);
+  res.send(doc.data);
+});
+
 app.post('/api/captain/location', captainAuth.requireAuth, (req, res) => {
   const { lat, lng } = req.body || {};
   if (typeof lat !== 'number' || typeof lng !== 'number') return res.status(400).json({ error: 'lat and lng (numbers) are required.' });
@@ -508,7 +565,7 @@ app.post('/api/push/unsubscribe', captainAuth.requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-/* ---------- supervisor (read-only) ---------- */
+/* ---------- supervisor: monitoring + account moderation ---------- */
 
 app.post('/api/supervisor/login', (req, res) => {
   const { username, password } = req.body || {};
@@ -524,11 +581,91 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
     vehicles: VEHICLES,
     cars: Object.values(state.cars),
     captains: Object.values(state.captains).map(captainAuth.toPublic),
-    customersCount: Object.keys(state.customers).length,
+    customers: Object.values(state.customers).map(customerAuth.toPublic),
     trips: state.trips.slice(0, 100),
     pendingPrivate: state.pendingPrivate,
     pushSubscriberCount: Object.keys(state.pushSubs || {}).length,
   });
+});
+
+// Document images/PDFs are viewed via <img>/<a> tags in the dashboard, which
+// can't send an Authorization header — so this one endpoint accepts the
+// session token as a query param instead. Everything else stays header-only.
+app.get('/api/supervisor/document/:captainId/:docType', async (req, res) => {
+  const account = supervisorAuth.validateSession(req.query.token || '');
+  if (!account) return res.status(401).json({ error: 'Not authenticated.' });
+  const captain = state.captains[req.params.captainId];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  const fileId = captain.documents && captain.documents[req.params.docType];
+  if (!fileId) return res.status(404).json({ error: 'Not uploaded.' });
+  const doc = await files.getDocument(fileId);
+  if (!doc) return res.status(404).json({ error: 'File not found.' });
+  res.set('Content-Type', doc.mimeType);
+  res.send(doc.data);
+});
+
+app.post('/api/supervisor/captain/:id/approve', supervisorAuth.requireAuth, (req, res) => {
+  const captain = state.captains[req.params.id];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  if (captain.accountStatus !== 'pending_review') return res.status(409).json({ error: 'This captain is not awaiting review.' });
+  captain.accountStatus = 'active';
+  captain.rejectionReason = null;
+  db.save();
+  res.json({ captain: captainAuth.toPublic(captain) });
+});
+
+app.post('/api/supervisor/captain/:id/reject', supervisorAuth.requireAuth, (req, res) => {
+  const captain = state.captains[req.params.id];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  if (captain.accountStatus !== 'pending_review') return res.status(409).json({ error: 'This captain is not awaiting review.' });
+  captain.accountStatus = 'rejected';
+  captain.rejectionReason = (req.body && req.body.reason) || 'Documents did not meet requirements.';
+  db.save();
+  res.json({ captain: captainAuth.toPublic(captain) });
+});
+
+app.post('/api/supervisor/captain/:id/suspend', supervisorAuth.requireAuth, (req, res) => {
+  const captain = state.captains[req.params.id];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  captain.accountStatus = 'suspended';
+  if (captain.status !== 'in_trip' && captain.currentCarId) {
+    // free whatever car they were holding, same as a normal go-offline
+    const car = state.cars[captain.currentCarId];
+    if (car && car.status !== 'in_trip') {
+      car.captainId = null; car.captainName = undefined; car.captainPlate = undefined;
+      if (car.mode === 'shared') car.status = 'forming';
+      broadcastCar(car);
+    }
+  }
+  captain.status = 'offline';
+  captain.currentCarId = null;
+  db.save();
+  res.json({ captain: captainAuth.toPublic(captain) });
+});
+
+app.post('/api/supervisor/captain/:id/reactivate', supervisorAuth.requireAuth, (req, res) => {
+  const captain = state.captains[req.params.id];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  if (captain.accountStatus !== 'suspended') return res.status(409).json({ error: 'This captain is not suspended.' });
+  captain.accountStatus = 'active';
+  db.save();
+  res.json({ captain: captainAuth.toPublic(captain) });
+});
+
+app.post('/api/supervisor/customer/:id/suspend', supervisorAuth.requireAuth, (req, res) => {
+  const customer = state.customers[req.params.id];
+  if (!customer) return res.status(404).json({ error: 'Customer not found.' });
+  customer.accountStatus = 'suspended';
+  db.save();
+  res.json({ customer: customerAuth.toPublic(customer) });
+});
+
+app.post('/api/supervisor/customer/:id/reactivate', supervisorAuth.requireAuth, (req, res) => {
+  const customer = state.customers[req.params.id];
+  if (!customer) return res.status(404).json({ error: 'Customer not found.' });
+  customer.accountStatus = 'active';
+  db.save();
+  res.json({ customer: customerAuth.toPublic(customer) });
 });
 
 wss.on('connection', () => {});
