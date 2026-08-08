@@ -16,6 +16,7 @@ const {
 const db = require('./db');
 const push = require('./push');
 const { hashPassword, checkPassword, makeAccountKit } = require('./auth');
+const { POINTS } = require('./points');
 
 const state = db.state;
 state.cars = state.cars || {};
@@ -208,6 +209,7 @@ setInterval(() => {
 /* ---------- public routes ---------- */
 
 app.get('/api/vehicles', (req, res) => res.json(VEHICLES));
+app.get('/api/points', (req, res) => res.json(POINTS));
 app.get('/api/vacancies', (req, res) => {
   const { direction } = req.query;
   if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
