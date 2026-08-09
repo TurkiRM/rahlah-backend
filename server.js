@@ -19,7 +19,7 @@ const db = require('./db');
 const push = require('./push');
 const files = require('./files');
 const { hashPassword, checkPassword, makeAccountKit } = require('./auth');
-const { POINTS } = require('./points');
+const { POINTS, DIRECTIONS, isValidDirection, directionLabel } = require('./points');
 
 const state = db.state;
 state.cars = state.cars || {};
@@ -221,9 +221,10 @@ setInterval(() => {
 
 app.get('/api/vehicles', (req, res) => res.json(VEHICLES));
 app.get('/api/points', (req, res) => res.json(POINTS));
+app.get('/api/directions', (req, res) => res.json(DIRECTIONS));
 app.get('/api/vacancies', (req, res) => {
   const { direction } = req.query;
-  if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
   const out = {};
   Object.keys(VEHICLES).forEach((vt) => (out[vt] = vehicleVacancy(vt, direction)));
   res.json(out);
@@ -263,7 +264,7 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
   if (req.account.accountStatus === 'suspended') return res.status(403).json({ error: 'Your account has been suspended. Contact support.' });
   const { vehicleType, direction, party } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
-  if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
   const men = Math.max(0, parseInt(party?.men ?? 0, 10));
   const women = Math.max(0, parseInt(party?.women ?? 0, 10));
   const genders = [...Array(men).fill('men'), ...Array(women).fill('women')];
@@ -325,7 +326,7 @@ app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
   if (req.account.accountStatus === 'suspended') return res.status(403).json({ error: 'Your account has been suspended. Contact support.' });
   const { vehicleType, direction } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
-  if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
 
   const car = newCar({ id: randomUUID(), vehicleType, direction, mode: 'private' });
   car.bookings = [{ customerId: req.account.id, seats: 'ALL', fare: VEHICLES[vehicleType].fullPrice }];
@@ -399,7 +400,7 @@ app.get('/api/captain/me', captainAuth.requireAuth, (req, res) => {
 app.post('/api/captain/online', captainAuth.requireAuth, (req, res) => {
   const { vehicleType, direction } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
-  if (!['A_TO_B', 'B_TO_A'].includes(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
   if (req.account.accountStatus !== 'active') {
     const messages = {
       documents_needed: 'Upload your documents before going online.',
