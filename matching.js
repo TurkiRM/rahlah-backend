@@ -2,11 +2,16 @@
 // This is the ONE place seat/gender rules live. Both the customer and captain
 // apps only ever see the result of these functions over the API/WebSocket —
 // neither app decides seating on its own anymore.
+//
+// Note: fares are NOT defined here anymore — with the route being a line of
+// several points, price depends on the specific route (how many hops apart
+// the two points are), not just the vehicle type. See points.js's fareFor().
+// VEHICLES below only describes each vehicle's physical seat layout.
 
 const VEHICLES = {
-  sedan:   { name: 'Sedan',      icon: '🚗', price: 4, fullPrice: 12, frontSeats: 1, rows: 1, rowLabel: 'Back row' },
-  family:  { name: 'Family car', icon: '🚙', price: 3, fullPrice: 15, frontSeats: 1, rows: 2, rowLabel: 'Row' },
-  minibus: { name: 'Mini bus',   icon: '🚐', price: 2, fullPrice: 25, frontSeats: 2, rows: 4, rowLabel: 'Row' },
+  sedan:   { name: 'Sedan',      icon: '🚗', frontSeats: 1, rows: 1, rowLabel: 'Back row' },
+  family:  { name: 'Family car', icon: '🚙', frontSeats: 1, rows: 2, rowLabel: 'Row' },
+  minibus: { name: 'Mini bus',   icon: '🚐', frontSeats: 2, rows: 4, rowLabel: 'Row' },
 };
 
 function totalSeats(vehicleType) {

@@ -19,7 +19,7 @@ const db = require('./db');
 const push = require('./push');
 const files = require('./files');
 const { hashPassword, checkPassword, makeAccountKit } = require('./auth');
-const { POINTS, DIRECTIONS, isValidDirection, directionLabel } = require('./points');
+const { POINTS, DIRECTIONS, isValidDirection, directionLabel, fareFor, LINE_ORDER, FARE_TIERS } = require('./points');
 
 const state = db.state;
 state.cars = state.cars || {};
@@ -222,6 +222,16 @@ setInterval(() => {
 app.get('/api/vehicles', (req, res) => res.json(VEHICLES));
 app.get('/api/points', (req, res) => res.json(POINTS));
 app.get('/api/directions', (req, res) => res.json(DIRECTIONS));
+app.get('/api/fare', (req, res) => {
+  const { direction } = req.query;
+  if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  const out = {};
+  Object.keys(VEHICLES).forEach((vt) => (out[vt] = fareFor(vt, direction)));
+  res.json(out);
+});
+app.get('/api/fare-tiers', (req, res) => {
+  res.json({ lineOrder: LINE_ORDER, tiers: FARE_TIERS });
+});
 app.get('/api/vacancies', (req, res) => {
   const { direction } = req.query;
   if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
@@ -265,6 +275,8 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
   const { vehicleType, direction, party } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
   if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  const fare = fareFor(vehicleType, direction);
+  if (!fare) return res.status(400).json({ error: 'No fare is defined for this route yet.' });
   const men = Math.max(0, parseInt(party?.men ?? 0, 10));
   const women = Math.max(0, parseInt(party?.women ?? 0, 10));
   const genders = [...Array(men).fill('men'), ...Array(women).fill('women')];
@@ -285,7 +297,8 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
   car.bookings = car.bookings || [];
 
   const mySeats = seatParty(car, genders);
-  car.bookings.push({ customerId: req.account.id, seats: mySeats, fare: genders.length * VEHICLES[vehicleType].price });
+  const myFare = genders.length * fare.seat;
+  car.bookings.push({ customerId: req.account.id, seats: mySeats, fare: myFare });
   req.account.activeCarId = car.id;
 
   if (seatsFilled(car) === totalSeats(vehicleType) && !car.captainId) {
@@ -305,7 +318,7 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
 
   db.save();
   broadcastCar(car);
-  res.json({ carId: car.id, mySeats, fare: genders.length * VEHICLES[vehicleType].price, car });
+  res.json({ carId: car.id, mySeats, fare: myFare, car });
 });
 
 app.post('/api/book/:carId/cancel', customerAuth.requireAuth, (req, res) => {
@@ -327,9 +340,11 @@ app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
   const { vehicleType, direction } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
   if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
+  const fare = fareFor(vehicleType, direction);
+  if (!fare) return res.status(400).json({ error: 'No fare is defined for this route yet.' });
 
   const car = newCar({ id: randomUUID(), vehicleType, direction, mode: 'private' });
-  car.bookings = [{ customerId: req.account.id, seats: 'ALL', fare: VEHICLES[vehicleType].fullPrice }];
+  car.bookings = [{ customerId: req.account.id, seats: 'ALL', fare: fare.full }];
   state.cars[car.id] = car;
   req.account.activeCarId = car.id;
 
@@ -344,13 +359,13 @@ app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
     state.pendingPrivate[k].push(car.id);
     notifyCaptainsFor(vehicleType, direction, {
       title: `A private ${VEHICLES[vehicleType].name} booking is waiting`,
-      body: `Someone booked the whole car for ${VEHICLES[vehicleType].fullPrice} SAR — open Rahlah to accept.`,
+      body: `Someone booked the whole car for ${fare.full} SAR — open Rahlah to accept.`,
     });
   }
 
   db.save();
   broadcastCar(car);
-  res.json({ carId: car.id, fare: VEHICLES[vehicleType].fullPrice, car, captainAssigned: !!car.captainId });
+  res.json({ carId: car.id, fare: fare.full, car, captainAssigned: !!car.captainId });
 });
 
 app.get('/api/car/:id', (req, res) => {
@@ -463,7 +478,8 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
   const car = state.cars[captain.currentCarId];
   if (!car) return res.status(404).json({ error: 'No active car for this captain.' });
 
-  const fare = car.mode === 'private' ? VEHICLES[car.vehicleType].fullPrice : seatsFilled(car) * VEHICLES[car.vehicleType].price;
+  const fareInfo = fareFor(car.vehicleType, car.direction);
+  const fare = car.mode === 'private' ? fareInfo.full : seatsFilled(car) * fareInfo.seat;
   car.status = 'completed';
   car.completedAt = Date.now();
   captain.earnings += fare;
