@@ -510,6 +510,17 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
   captain.currentCarId = null;
   broadcastCar(car);
 
+  // The captain is now physically at the trip's destination — flip them to the
+  // reverse direction so they're offered routes departing from where they
+  // actually are, instead of staying stuck on a direction they've just driven
+  // away from (which would mean waiting for a car that can never reach them,
+  // or driving back empty to be useful again).
+  const completedDir = DIRECTIONS[car.direction];
+  if (completedDir) {
+    const reverseDirection = `${completedDir.to}_TO_${completedDir.from}`;
+    if (isValidDirection(reverseDirection)) captain.direction = reverseDirection;
+  }
+
   const nextCar = claimForCaptain(captain);
   if (nextCar) assignCarToCaptain(nextCar, captain);
 
