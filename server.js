@@ -697,8 +697,34 @@ wss.on('connection', () => {});
 
 const PORT = process.env.PORT || 3000;
 
+// Backfills fields onto accounts created before a given feature existed — e.g.
+// captains/customers registered before document verification & suspension were
+// added won't have accountStatus/documents/etc. in their stored record at all,
+// which crashes anything that assumes those fields are always present (like a
+// dashboard trying to render an account-status badge). Existing accounts are
+// treated as already trustworthy (accountStatus 'active'), not re-gated behind
+// a review they were never asked for.
+function backfillLegacyAccounts() {
+  let touched = false;
+  Object.values(state.captains).forEach((cap) => {
+    if (cap.accountStatus === undefined) { cap.accountStatus = 'active'; touched = true; }
+    if (cap.documents === undefined) { cap.documents = { license: null, vehicleRegistration: null, insurance: null, inspection: null, photo: null }; touched = true; }
+    if (cap.rejectionReason === undefined) { cap.rejectionReason = null; touched = true; }
+    if (cap.location === undefined) { cap.location = null; touched = true; }
+  });
+  Object.values(state.customers).forEach((cust) => {
+    if (cust.accountStatus === undefined) { cust.accountStatus = 'active'; touched = true; }
+    if (cust.activeCarId === undefined) { cust.activeCarId = null; touched = true; }
+  });
+  if (touched) {
+    console.log('Backfilled missing fields on one or more legacy accounts.');
+    db.save();
+  }
+}
+
 async function main() {
   await db.ready; // don't accept any traffic until real persisted state (if any) has loaded
+  backfillLegacyAccounts();
   bootstrapSupervisorIfNeeded();
   server.listen(PORT, () => {
     console.log(`Rahlah backend API running → http://localhost:${PORT}`);
