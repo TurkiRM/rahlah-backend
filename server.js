@@ -32,7 +32,12 @@ const captainAuth = makeAccountKit({
   accountsKey: 'captains',
   sessionsKey: 'captainSessions',
   loginField: 'phone',
-  publicFields: ['id', 'phone', 'name', 'plate', 'vehicleType', 'direction', 'status', 'currentCarId', 'earnings', 'tripHistory', 'location', 'accountStatus', 'documents', 'rejectionReason', 'createdAt'],
+  publicFields: [
+    'id', 'phone', 'name',
+    'vehicles', 'personalDocuments', 'personalDocumentsApproved', 'suspended',
+    'vehicleType', 'currentPoint', 'status', 'currentCarId',
+    'earnings', 'tripHistory', 'location', 'createdAt',
+  ],
 });
 const customerAuth = makeAccountKit({
   accountsKey: 'customers',
@@ -81,13 +86,19 @@ function broadcastCar(car) {
   });
 }
 
-function key(vehicleType, direction) {
-  return `${vehicleType}_${direction}`;
+// Pending-private queue key. Keyed by (vehicle type, departure point) rather
+// than a specific direction — a captain sitting at a point is available for
+// ANY route departing from there, so all directions leaving that point share
+// one queue.
+function pointKey(vehicleType, pointId) {
+  return `${vehicleType}_at_${pointId}`;
 }
 
 function notifyCaptainsFor(vehicleType, direction, message) {
+  const d = DIRECTIONS[direction];
+  if (!d) return;
   const targetIds = Object.values(state.captains)
-    .filter((c) => c.vehicleType === vehicleType && c.direction === direction)
+    .filter((c) => c.vehicleType === vehicleType && c.currentPoint === d.from)
     .map((c) => c.id);
   push.notifyCaptainIds(targetIds, message);
 }
@@ -97,35 +108,43 @@ function notifyCaptainsFor(vehicleType, direction, message) {
  *   1. a private (whole-car) booking waiting in the queue, or
  *   2. a shared car that has already filled every seat, or
  *   3. a partial shared car whose captain-offer they accept.
+ *
+ * A captain's availability is tracked by CURRENT POINT, not a fixed
+ * direction — once free, they're eligible for any route departing from
+ * wherever they physically are, not just the one route they originally
+ * picked. See complete-trip below for how currentPoint updates.
  */
 
 const PARTIAL_OFFER_WAIT_MS = 30 * 1000;
 const OFFER_RESPONSE_TIMEOUT_MS = 25 * 1000;
 
 function claimForCaptain(captain) {
-  const k = key(captain.vehicleType, captain.direction);
+  const k = pointKey(captain.vehicleType, captain.currentPoint);
   const queue = state.pendingPrivate[k] || [];
   while (queue.length) {
     const carId = queue.shift();
     const car = state.cars[carId];
     if (car && car.status === 'ready' && !car.captainId) return car;
   }
-  const fullCar = Object.values(state.cars).find(
-    (c) =>
+  const fullCar = Object.values(state.cars).find((c) => {
+    const d = DIRECTIONS[c.direction];
+    return (
       c.vehicleType === captain.vehicleType &&
-      c.direction === captain.direction &&
       c.mode === 'shared' &&
       c.status === 'forming' &&
       !c.captainId &&
-      seatsFilled(c) === totalSeats(c.vehicleType)
-  );
+      seatsFilled(c) === totalSeats(c.vehicleType) &&
+      d && d.from === captain.currentPoint
+    );
+  });
   return fullCar || null;
 }
 
 function assignCarToCaptain(car, captain) {
+  const vehicle = captain.vehicles[car.vehicleType];
   car.captainId = captain.id;
   car.captainName = captain.name;
-  car.captainPlate = captain.plate;
+  car.captainPlate = vehicle ? vehicle.plate : '—';
   car.captainPhone = captain.phone;
   car.status = 'ready';
   captain.currentCarId = car.id;
@@ -139,6 +158,16 @@ function findOpenCarForBooking(vehicleType, direction, genders) {
     if (tryFitParty(car, genders)) return car;
   }
   return null;
+}
+
+// Finds an idle captain (online, no current car) sitting at the departure
+// point of `direction`, driving `vehicleType`.
+function findIdleCaptainFor(vehicleType, direction) {
+  const d = DIRECTIONS[direction];
+  if (!d) return null;
+  return Object.values(state.captains).find(
+    (cap) => cap.status === 'online' && !cap.currentCarId && cap.vehicleType === vehicleType && cap.currentPoint === d.from
+  );
 }
 
 function vehicleVacancy(vehicleType, direction) {
@@ -197,9 +226,10 @@ setInterval(() => {
     if (car.pendingOffer) return;
     if (now - car.createdAt < PARTIAL_OFFER_WAIT_MS) return;
 
+    const d = DIRECTIONS[car.direction];
     const declined = car.declinedBy || [];
-    const idleCaptain = Object.values(state.captains).find(
-      (cap) => cap.status === 'online' && !cap.currentCarId && cap.vehicleType === car.vehicleType && cap.direction === car.direction && !declined.includes(cap.id)
+    const idleCaptain = d && Object.values(state.captains).find(
+      (cap) => cap.status === 'online' && !cap.currentCarId && cap.vehicleType === car.vehicleType && cap.currentPoint === d.from && !declined.includes(cap.id)
     );
     if (idleCaptain) {
       car.pendingOffer = { captainId: idleCaptain.id, expiresAt: now + OFFER_RESPONSE_TIMEOUT_MS };
@@ -302,9 +332,7 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
   req.account.activeCarId = car.id;
 
   if (seatsFilled(car) === totalSeats(vehicleType) && !car.captainId) {
-    const idleCaptain = Object.values(state.captains).find(
-      (cap) => cap.status === 'online' && !cap.currentCarId && cap.vehicleType === vehicleType && cap.direction === direction
-    );
+    const idleCaptain = findIdleCaptainFor(vehicleType, direction);
     if (idleCaptain) {
       assignCarToCaptain(car, idleCaptain);
     } else if (!car.notifiedFull) {
@@ -324,16 +352,13 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
 app.post('/api/book/:carId/cancel', customerAuth.requireAuth, (req, res) => {
   const car = state.cars[req.params.carId];
   if (!car) return res.status(404).json({ error: 'Car not found.' });
-  // The meaningful boundary is "has a captain actually been committed to this
-  // car yet?" — not car.status, since a private booking is marked 'ready' the
-  // instant it's created, even while it's still sitting unclaimed in the
-  // pending-private queue with no captain attached at all.
   if (car.captainId) return res.status(409).json({ error: "A captain has already been matched to this car — it can't be cancelled from here." });
   if (car.status === 'in_trip' || car.status === 'completed') return res.status(409).json({ error: "This trip can't be cancelled anymore." });
 
   if (car.mode === 'private') {
-    const k = key(car.vehicleType, car.direction);
-    if (state.pendingPrivate[k]) {
+    const d = DIRECTIONS[car.direction];
+    const k = d ? pointKey(car.vehicleType, d.from) : null;
+    if (k && state.pendingPrivate[k]) {
       state.pendingPrivate[k] = state.pendingPrivate[k].filter((id) => id !== car.id);
     }
     delete state.cars[car.id];
@@ -365,13 +390,12 @@ app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
   state.cars[car.id] = car;
   req.account.activeCarId = car.id;
 
-  const idleCaptain = Object.values(state.captains).find(
-    (cap) => cap.status === 'online' && !cap.currentCarId && cap.vehicleType === vehicleType && cap.direction === direction
-  );
+  const idleCaptain = findIdleCaptainFor(vehicleType, direction);
   if (idleCaptain) {
     assignCarToCaptain(car, idleCaptain);
   } else {
-    const k = key(vehicleType, direction);
+    const d = DIRECTIONS[direction];
+    const k = pointKey(vehicleType, d.from);
     state.pendingPrivate[k] = state.pendingPrivate[k] || [];
     state.pendingPrivate[k].push(car.id);
     notifyCaptainsFor(vehicleType, direction, {
@@ -394,18 +418,28 @@ app.get('/api/car/:id', (req, res) => {
 /* ---------- captain accounts ---------- */
 
 app.post('/api/captain/register', (req, res) => {
-  const { phone, password, name, plate } = req.body || {};
-  if (!phone || !password || !name || !plate) return res.status(400).json({ error: 'Phone, password, name, and plate are required.' });
+  const { phone, password, name, vehicleType, plate } = req.body || {};
+  if (!phone || !password || !name || !vehicleType || !plate) {
+    return res.status(400).json({ error: 'Phone, password, name, vehicle type, and plate are required.' });
+  }
+  if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
   if (captainAuth.findByLogin(phone)) return res.status(409).json({ error: 'An account with this phone number already exists.' });
   const id = randomUUID();
   const account = {
-    id, phone, passwordHash: hashPassword(password), name, plate,
-    vehicleType: null, direction: null, status: 'offline', currentCarId: null,
-    earnings: 0, tripHistory: [], location: null,
-    accountStatus: 'documents_needed',
-    documents: { license: null, vehicleRegistration: null, insurance: null, inspection: null, photo: null },
-    rejectionReason: null,
-    createdAt: Date.now(),
+    id, phone, passwordHash: hashPassword(password), name,
+    vehicles: {
+      [vehicleType]: {
+        plate,
+        documents: { vehicleRegistration: null, insurance: null, inspection: null },
+        accountStatus: 'documents_needed',
+        rejectionReason: null,
+      },
+    },
+    personalDocuments: { license: null, photo: null },
+    personalDocumentsApproved: false,
+    suspended: false,
+    vehicleType: null, currentPoint: null, status: 'offline', currentCarId: null,
+    earnings: 0, tripHistory: [], location: null, createdAt: Date.now(),
   };
   state.captains[id] = account;
   db.save();
@@ -429,23 +463,44 @@ app.get('/api/captain/me', captainAuth.requireAuth, (req, res) => {
   res.json({ captain: captainAuth.toPublic(captain), car, offer: offerCar });
 });
 
-app.post('/api/captain/online', captainAuth.requireAuth, (req, res) => {
-  const { vehicleType, direction } = req.body || {};
+// Add a second (or third) vehicle type to an existing captain account. Their
+// license/photo are already on file — only this vehicle's own documents are
+// needed before it can be driven.
+app.post('/api/captain/vehicles', captainAuth.requireAuth, (req, res) => {
+  const { vehicleType, plate } = req.body || {};
   if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
-  if (!isValidDirection(direction)) return res.status(400).json({ error: 'Unknown direction.' });
-  if (req.account.accountStatus !== 'active') {
+  if (!plate) return res.status(400).json({ error: 'Plate is required.' });
+  const captain = req.account;
+  if (captain.vehicles[vehicleType]) return res.status(409).json({ error: 'You already have this vehicle type on your account.' });
+  captain.vehicles[vehicleType] = {
+    plate,
+    documents: { vehicleRegistration: null, insurance: null, inspection: null },
+    accountStatus: 'documents_needed',
+    rejectionReason: null,
+  };
+  db.save();
+  res.json({ captain: captainAuth.toPublic(captain) });
+});
+
+app.post('/api/captain/online', captainAuth.requireAuth, (req, res) => {
+  const { vehicleType, currentPoint } = req.body || {};
+  if (!VEHICLES[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle type.' });
+  if (!POINTS[currentPoint]) return res.status(400).json({ error: 'Unknown point.' });
+  const captain = req.account;
+  if (captain.suspended) return res.status(403).json({ error: 'Your account has been suspended. Contact support.' });
+  const vehicle = captain.vehicles[vehicleType];
+  if (!vehicle) return res.status(403).json({ error: `You haven't added a ${VEHICLES[vehicleType].name} to your account yet.` });
+  if (vehicle.accountStatus !== 'active') {
     const messages = {
-      documents_needed: 'Upload your documents before going online.',
-      pending_review: 'Your documents are still being reviewed — you can\'t go online yet.',
-      rejected: `Your account was not approved${req.account.rejectionReason ? ': ' + req.account.rejectionReason : '.'}`,
-      suspended: 'Your account has been suspended. Contact support.',
+      documents_needed: `Upload your ${VEHICLES[vehicleType].name} documents before driving it.`,
+      pending_review: `Your ${VEHICLES[vehicleType].name} documents are still being reviewed — you can't drive it yet.`,
+      rejected: `Your ${VEHICLES[vehicleType].name} wasn't approved${vehicle.rejectionReason ? ': ' + vehicle.rejectionReason : '.'}`,
     };
-    return res.status(403).json({ error: messages[req.account.accountStatus] || 'Your account cannot go online right now.' });
+    return res.status(403).json({ error: messages[vehicle.accountStatus] || 'This vehicle cannot go online right now.' });
   }
 
-  const captain = req.account;
   captain.vehicleType = vehicleType;
-  captain.direction = direction;
+  captain.currentPoint = currentPoint;
   captain.status = 'online';
   captain.currentCarId = null;
 
@@ -501,6 +556,7 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
   car.completedAt = Date.now();
   captain.earnings += fare;
 
+  const vehicle = captain.vehicles[car.vehicleType];
   // Passenger list on the CAPTAIN's own record — who was actually in the car, the
   // core safety-relevant piece if something needs to be looked into afterward.
   const passengers = (car.bookings || []).map((b) => {
@@ -518,7 +574,7 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
     id: car.id, vehicleType: car.vehicleType, direction: car.direction, mode: car.mode,
     seats: car.mode === 'private' ? totalSeats(car.vehicleType) : seatsFilled(car),
     fare, startedAt: car.startedAt || null, completedAt: car.completedAt,
-    captainId: captain.id, captainName: captain.name, captainPlate: captain.plate,
+    captainId: captain.id, captainName: captain.name, captainPlate: vehicle ? vehicle.plate : '—',
     passengers,
   };
   captain.tripHistory.unshift(tripRecord);
@@ -527,16 +583,11 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
   captain.currentCarId = null;
   broadcastCar(car);
 
-  // The captain is now physically at the trip's destination — flip them to the
-  // reverse direction so they're offered routes departing from where they
-  // actually are, instead of staying stuck on a direction they've just driven
-  // away from (which would mean waiting for a car that can never reach them,
-  // or driving back empty to be useful again).
+  // The captain is now physically at the trip's destination — move them there
+  // so they're offered any route departing from where they actually are, not
+  // just the reverse of the trip they just finished.
   const completedDir = DIRECTIONS[car.direction];
-  if (completedDir) {
-    const reverseDirection = `${completedDir.to}_TO_${completedDir.from}`;
-    if (isValidDirection(reverseDirection)) captain.direction = reverseDirection;
-  }
+  if (completedDir) captain.currentPoint = completedDir.to;
 
   const nextCar = claimForCaptain(captain);
   if (nextCar) assignCarToCaptain(nextCar, captain);
@@ -556,7 +607,8 @@ app.post('/api/captain/offline', captainAuth.requireAuth, (req, res) => {
     if (car.mode === 'shared') {
       car.status = 'forming';
     } else {
-      const k = key(car.vehicleType, car.direction);
+      const d = DIRECTIONS[car.direction];
+      const k = pointKey(car.vehicleType, d.from);
       state.pendingPrivate[k] = state.pendingPrivate[k] || [];
       state.pendingPrivate[k].push(car.id);
     }
@@ -568,20 +620,33 @@ app.post('/api/captain/offline', captainAuth.requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-const DOC_TYPES = ['license', 'vehicleRegistration', 'insurance', 'inspection', 'photo'];
-const DOC_UPLOAD_FIELDS = DOC_TYPES.map((name) => ({ name, maxCount: 1 }));
+const VEHICLE_DOC_TYPES = ['vehicleRegistration', 'insurance', 'inspection'];
+const PERSONAL_DOC_TYPES = ['license', 'photo'];
+const DOC_UPLOAD_FIELDS = [...VEHICLE_DOC_TYPES, ...PERSONAL_DOC_TYPES].map((name) => ({ name, maxCount: 1 }));
 
 app.post('/api/captain/documents', captainAuth.requireAuth, upload.fields(DOC_UPLOAD_FIELDS), async (req, res) => {
   const captain = req.account;
+  const vehicleType = req.body.vehicleType;
+  if (!vehicleType || !captain.vehicles[vehicleType]) return res.status(400).json({ error: 'Unknown vehicle for this account.' });
+  const vehicle = captain.vehicles[vehicleType];
   try {
-    for (const docType of DOC_TYPES) {
+    for (const docType of VEHICLE_DOC_TYPES) {
       const fileArr = req.files && req.files[docType];
-      if (!fileArr || !fileArr.length) continue; // allow uploading a subset / re-uploading one at a time
+      if (!fileArr || !fileArr.length) continue;
       const file = fileArr[0];
-      const oldId = captain.documents[docType];
+      const oldId = vehicle.documents[docType];
       const newId = await files.saveDocument(captain.id, docType, file.mimetype, file.buffer);
-      captain.documents[docType] = newId;
-      if (oldId) files.deleteDocument(oldId).catch(() => {}); // best-effort cleanup of the replaced file
+      vehicle.documents[docType] = newId;
+      if (oldId) files.deleteDocument(oldId).catch(() => {});
+    }
+    for (const docType of PERSONAL_DOC_TYPES) {
+      const fileArr = req.files && req.files[docType];
+      if (!fileArr || !fileArr.length) continue;
+      const file = fileArr[0];
+      const oldId = captain.personalDocuments[docType];
+      const newId = await files.saveDocument(captain.id, docType, file.mimetype, file.buffer);
+      captain.personalDocuments[docType] = newId;
+      if (oldId) files.deleteDocument(oldId).catch(() => {});
     }
   } catch (err) {
     if (err.code === 'FILE_TOO_LARGE') return res.status(413).json({ error: err.message });
@@ -589,17 +654,20 @@ app.post('/api/captain/documents', captainAuth.requireAuth, upload.fields(DOC_UP
     return res.status(500).json({ error: 'Could not save one or more documents. Try again.' });
   }
 
-  const allPresent = DOC_TYPES.every((t) => captain.documents[t]);
-  if (allPresent && (captain.accountStatus === 'documents_needed' || captain.accountStatus === 'rejected')) {
-    captain.accountStatus = 'pending_review';
-    captain.rejectionReason = null;
+  const vehicleDocsComplete = VEHICLE_DOC_TYPES.every((t) => vehicle.documents[t]);
+  const personalDocsComplete = captain.personalDocumentsApproved || PERSONAL_DOC_TYPES.every((t) => captain.personalDocuments[t]);
+  if (vehicleDocsComplete && personalDocsComplete && (vehicle.accountStatus === 'documents_needed' || vehicle.accountStatus === 'rejected')) {
+    vehicle.accountStatus = 'pending_review';
+    vehicle.rejectionReason = null;
   }
   db.save();
   res.json({ captain: captainAuth.toPublic(captain) });
 });
 
-app.get('/api/captain/document/:docType', captainAuth.requireAuth, async (req, res) => {
-  const fileId = req.account.documents[req.params.docType];
+app.get('/api/captain/document/:scope/:docType', captainAuth.requireAuth, async (req, res) => {
+  const { scope, docType } = req.params;
+  const captain = req.account;
+  const fileId = scope === 'personal' ? captain.personalDocuments[docType] : (captain.vehicles[scope] && captain.vehicles[scope].documents[docType]);
   if (!fileId) return res.status(404).json({ error: 'Not uploaded yet.' });
   const doc = await files.getDocument(fileId);
   if (!doc) return res.status(404).json({ error: 'File not found.' });
@@ -661,12 +729,13 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
 // Document images/PDFs are viewed via <img>/<a> tags in the dashboard, which
 // can't send an Authorization header — so this one endpoint accepts the
 // session token as a query param instead. Everything else stays header-only.
-app.get('/api/supervisor/document/:captainId/:docType', async (req, res) => {
+app.get('/api/supervisor/document/:captainId/:scope/:docType', async (req, res) => {
   const account = supervisorAuth.validateSession(req.query.token || '');
   if (!account) return res.status(401).json({ error: 'Not authenticated.' });
   const captain = state.captains[req.params.captainId];
   if (!captain) return res.status(404).json({ error: 'Captain not found.' });
-  const fileId = captain.documents && captain.documents[req.params.docType];
+  const { scope, docType } = req.params;
+  const fileId = scope === 'personal' ? captain.personalDocuments[docType] : (captain.vehicles[scope] && captain.vehicles[scope].documents[docType]);
   if (!fileId) return res.status(404).json({ error: 'Not uploaded.' });
   const doc = await files.getDocument(fileId);
   if (!doc) return res.status(404).json({ error: 'File not found.' });
@@ -674,22 +743,27 @@ app.get('/api/supervisor/document/:captainId/:docType', async (req, res) => {
   res.send(doc.data);
 });
 
-app.post('/api/supervisor/captain/:id/approve', supervisorAuth.requireAuth, (req, res) => {
+app.post('/api/supervisor/captain/:id/vehicle/:vehicleType/approve', supervisorAuth.requireAuth, (req, res) => {
   const captain = state.captains[req.params.id];
   if (!captain) return res.status(404).json({ error: 'Captain not found.' });
-  if (captain.accountStatus !== 'pending_review') return res.status(409).json({ error: 'This captain is not awaiting review.' });
-  captain.accountStatus = 'active';
-  captain.rejectionReason = null;
+  const vehicle = captain.vehicles[req.params.vehicleType];
+  if (!vehicle) return res.status(404).json({ error: 'Vehicle not found on this account.' });
+  if (vehicle.accountStatus !== 'pending_review') return res.status(409).json({ error: 'This vehicle is not awaiting review.' });
+  vehicle.accountStatus = 'active';
+  vehicle.rejectionReason = null;
+  captain.personalDocumentsApproved = true; // license/photo verified as part of this approval
   db.save();
   res.json({ captain: captainAuth.toPublic(captain) });
 });
 
-app.post('/api/supervisor/captain/:id/reject', supervisorAuth.requireAuth, (req, res) => {
+app.post('/api/supervisor/captain/:id/vehicle/:vehicleType/reject', supervisorAuth.requireAuth, (req, res) => {
   const captain = state.captains[req.params.id];
   if (!captain) return res.status(404).json({ error: 'Captain not found.' });
-  if (captain.accountStatus !== 'pending_review') return res.status(409).json({ error: 'This captain is not awaiting review.' });
-  captain.accountStatus = 'rejected';
-  captain.rejectionReason = (req.body && req.body.reason) || 'Documents did not meet requirements.';
+  const vehicle = captain.vehicles[req.params.vehicleType];
+  if (!vehicle) return res.status(404).json({ error: 'Vehicle not found on this account.' });
+  if (vehicle.accountStatus !== 'pending_review') return res.status(409).json({ error: 'This vehicle is not awaiting review.' });
+  vehicle.accountStatus = 'rejected';
+  vehicle.rejectionReason = (req.body && req.body.reason) || 'Documents did not meet requirements.';
   db.save();
   res.json({ captain: captainAuth.toPublic(captain) });
 });
@@ -697,15 +771,12 @@ app.post('/api/supervisor/captain/:id/reject', supervisorAuth.requireAuth, (req,
 app.post('/api/supervisor/captain/:id/suspend', supervisorAuth.requireAuth, (req, res) => {
   const captain = state.captains[req.params.id];
   if (!captain) return res.status(404).json({ error: 'Captain not found.' });
-  captain.accountStatus = 'suspended';
-  if (captain.status !== 'in_trip' && captain.currentCarId) {
-    // free whatever car they were holding, same as a normal go-offline
-    const car = state.cars[captain.currentCarId];
-    if (car && car.status !== 'in_trip') {
-      car.captainId = null; car.captainName = undefined; car.captainPlate = undefined;
-      if (car.mode === 'shared') car.status = 'forming';
-      broadcastCar(car);
-    }
+  captain.suspended = true;
+  const car = captain.currentCarId ? state.cars[captain.currentCarId] : null;
+  if (car && car.status !== 'in_trip') {
+    car.captainId = null; car.captainName = undefined; car.captainPlate = undefined;
+    if (car.mode === 'shared') car.status = 'forming';
+    broadcastCar(car);
   }
   captain.status = 'offline';
   captain.currentCarId = null;
@@ -716,8 +787,8 @@ app.post('/api/supervisor/captain/:id/suspend', supervisorAuth.requireAuth, (req
 app.post('/api/supervisor/captain/:id/reactivate', supervisorAuth.requireAuth, (req, res) => {
   const captain = state.captains[req.params.id];
   if (!captain) return res.status(404).json({ error: 'Captain not found.' });
-  if (captain.accountStatus !== 'suspended') return res.status(409).json({ error: 'This captain is not suspended.' });
-  captain.accountStatus = 'active';
+  if (!captain.suspended) return res.status(409).json({ error: 'This captain is not suspended.' });
+  captain.suspended = false;
   db.save();
   res.json({ captain: captainAuth.toPublic(captain) });
 });
@@ -742,19 +813,47 @@ wss.on('connection', () => {});
 
 const PORT = process.env.PORT || 3000;
 
-// Backfills fields onto accounts created before a given feature existed — e.g.
-// captains/customers registered before document verification & suspension were
-// added won't have accountStatus/documents/etc. in their stored record at all,
-// which crashes anything that assumes those fields are always present (like a
-// dashboard trying to render an account-status badge). Existing accounts are
-// treated as already trustworthy (accountStatus 'active'), not re-gated behind
+// Converts an account created before multi-vehicle support existed (a flat
+// plate/documents/accountStatus on the captain itself) into the new
+// vehicles-map shape. Existing approved captains keep driving what they were
+// already approved for — this is a data-shape migration, not a re-review.
+function migrateLegacyCaptainToVehicles(cap) {
+  if (cap.vehicles) return;
+  const vehicleType = cap.vehicleType || 'sedan';
+  const wasActive = cap.accountStatus === 'active' || cap.accountStatus === 'suspended';
+  cap.vehicles = {
+    [vehicleType]: {
+      plate: cap.plate || '—',
+      documents: {
+        vehicleRegistration: (cap.documents && cap.documents.vehicleRegistration) || null,
+        insurance: (cap.documents && cap.documents.insurance) || null,
+        inspection: (cap.documents && cap.documents.inspection) || null,
+      },
+      accountStatus: wasActive ? 'active' : (cap.accountStatus || 'active'),
+      rejectionReason: cap.rejectionReason || null,
+    },
+  };
+  cap.personalDocuments = {
+    license: (cap.documents && cap.documents.license) || null,
+    photo: (cap.documents && cap.documents.photo) || null,
+  };
+  cap.personalDocumentsApproved = wasActive;
+  cap.suspended = cap.accountStatus === 'suspended';
+  cap.currentPoint = (cap.direction && DIRECTIONS[cap.direction]) ? DIRECTIONS[cap.direction].from : null;
+  delete cap.plate;
+  delete cap.documents;
+  delete cap.accountStatus;
+  delete cap.rejectionReason;
+  delete cap.direction;
+}
+
+// Backfills fields onto accounts created before a given feature existed.
+// Existing accounts are treated as already trustworthy, not re-gated behind
 // a review they were never asked for.
 function backfillLegacyAccounts() {
   let touched = false;
   Object.values(state.captains).forEach((cap) => {
-    if (cap.accountStatus === undefined) { cap.accountStatus = 'active'; touched = true; }
-    if (cap.documents === undefined) { cap.documents = { license: null, vehicleRegistration: null, insurance: null, inspection: null, photo: null }; touched = true; }
-    if (cap.rejectionReason === undefined) { cap.rejectionReason = null; touched = true; }
+    if (!cap.vehicles) { migrateLegacyCaptainToVehicles(cap); touched = true; }
     if (cap.location === undefined) { cap.location = null; touched = true; }
   });
   Object.values(state.customers).forEach((cust) => {
