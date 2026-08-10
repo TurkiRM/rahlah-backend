@@ -726,6 +726,46 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
   });
 });
 
+// Manual override for a stuck car — a supervisor can hand-assign any currently
+// idle captain of the right vehicle type, even one sitting at a different
+// point than the car's origin. The automatic point-based matching couldn't
+// place them there on its own; this trusts the supervisor's judgment that the
+// captain can reasonably still take it (e.g. they're reachable by phone).
+app.post('/api/supervisor/car/:carId/assign-captain', supervisorAuth.requireAuth, (req, res) => {
+  const car = state.cars[req.params.carId];
+  if (!car) return res.status(404).json({ error: 'Car not found.' });
+  if (car.captainId) return res.status(409).json({ error: 'This car already has a captain.' });
+  const { captainId } = req.body || {};
+  const captain = state.captains[captainId];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  if (captain.status !== 'online' || captain.currentCarId) return res.status(409).json({ error: 'This captain is not currently idle.' });
+  if (captain.vehicleType !== car.vehicleType) return res.status(409).json({ error: "This captain's current vehicle doesn't match this car." });
+  assignCarToCaptain(car, captain);
+  db.save();
+  broadcastCar(car);
+  res.json({ car });
+});
+
+// Dissolves a stuck, uncaptained car — releases every waiting passenger so
+// they can rebook elsewhere instead of waiting indefinitely for a captain who
+// may never come. Only for cars with no captain yet; once a captain is
+// assigned, that's the captain's trip to finish or the customer's to cancel,
+// not something to pull out from under them here.
+app.post('/api/supervisor/car/:carId/cancel', supervisorAuth.requireAuth, (req, res) => {
+  const car = state.cars[req.params.carId];
+  if (!car) return res.status(404).json({ error: 'Car not found.' });
+  if (car.captainId) return res.status(409).json({ error: "This car already has a captain — can't cancel from here." });
+  car.status = 'cancelled';
+  car.cancelledAt = Date.now();
+  (car.bookings || []).forEach((b) => {
+    const cust = state.customers[b.customerId];
+    if (cust && cust.activeCarId === car.id) cust.activeCarId = null;
+  });
+  db.save();
+  broadcastCar(car);
+  res.json({ car });
+});
+
 // Document images/PDFs are viewed via <img>/<a> tags in the dashboard, which
 // can't send an Authorization header — so this one endpoint accepts the
 // session token as a query param instead. Everything else stays header-only.
