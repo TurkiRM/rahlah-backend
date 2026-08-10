@@ -324,7 +324,24 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
 app.post('/api/book/:carId/cancel', customerAuth.requireAuth, (req, res) => {
   const car = state.cars[req.params.carId];
   if (!car) return res.status(404).json({ error: 'Car not found.' });
-  if (car.status !== 'forming') return res.status(409).json({ error: "This car already has a captain and can't be changed." });
+  // The meaningful boundary is "has a captain actually been committed to this
+  // car yet?" — not car.status, since a private booking is marked 'ready' the
+  // instant it's created, even while it's still sitting unclaimed in the
+  // pending-private queue with no captain attached at all.
+  if (car.captainId) return res.status(409).json({ error: "A captain has already been matched to this car — it can't be cancelled from here." });
+  if (car.status === 'in_trip' || car.status === 'completed') return res.status(409).json({ error: "This trip can't be cancelled anymore." });
+
+  if (car.mode === 'private') {
+    const k = key(car.vehicleType, car.direction);
+    if (state.pendingPrivate[k]) {
+      state.pendingPrivate[k] = state.pendingPrivate[k].filter((id) => id !== car.id);
+    }
+    delete state.cars[car.id];
+    if (req.account.activeCarId === car.id) req.account.activeCarId = null;
+    db.save();
+    return res.json({ cancelled: true });
+  }
+
   const seats = req.body?.seats;
   if (!Array.isArray(seats)) return res.status(400).json({ error: 'Missing seats to release.' });
   releaseSeats(car, seats);
