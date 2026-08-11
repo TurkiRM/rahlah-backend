@@ -352,26 +352,69 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
 app.post('/api/book/:carId/cancel', customerAuth.requireAuth, (req, res) => {
   const car = state.cars[req.params.carId];
   if (!car) return res.status(404).json({ error: 'Car not found.' });
-  if (car.captainId) return res.status(409).json({ error: "A captain has already been matched to this car — it can't be cancelled from here." });
-  if (car.status === 'in_trip' || car.status === 'completed') return res.status(409).json({ error: "This trip can't be cancelled anymore." });
-
-  if (car.mode === 'private') {
-    const d = DIRECTIONS[car.direction];
-    const k = d ? pointKey(car.vehicleType, d.from) : null;
-    if (k && state.pendingPrivate[k]) {
-      state.pendingPrivate[k] = state.pendingPrivate[k].filter((id) => id !== car.id);
-    }
-    delete state.cars[car.id];
-    if (req.account.activeCarId === car.id) req.account.activeCarId = null;
-    db.save();
-    return res.json({ cancelled: true });
+  if (car.status === 'in_trip' || car.status === 'completed' || car.status === 'cancelled') {
+    return res.status(409).json({ error: "This trip can't be cancelled anymore — it's already started." });
   }
 
+  const myBooking = (car.bookings || []).find((b) => b.customerId === req.account.id);
+  if (!myBooking) return res.status(404).json({ error: 'No booking found for you on this car.' });
+
+  const assignedCaptain = car.captainId ? state.captains[car.captainId] : null;
+
+  // Frees whichever captain was holding this car (if any) and immediately
+  // hands them whatever's next in line for them, exactly like a normal
+  // trip completion would — a cancellation shouldn't leave a captain
+  // stranded mid-assignment with nothing to do.
+  function releaseCaptainAndReassign() {
+    if (!assignedCaptain) return null;
+    assignedCaptain.currentCarId = null;
+    const nextCar = claimForCaptain(assignedCaptain);
+    if (nextCar) assignCarToCaptain(nextCar, assignedCaptain);
+    return nextCar;
+  }
+
+  if (car.mode === 'private') {
+    // One booking, one car — cancelling it cancels the whole thing, whatever stage it's at.
+    const nextCar = releaseCaptainAndReassign();
+    if (!assignedCaptain) {
+      // still sitting unclaimed in the pending queue — remove it so no captain gets dispatched to it later
+      const d = DIRECTIONS[car.direction];
+      const k = d ? pointKey(car.vehicleType, d.from) : null;
+      if (k && state.pendingPrivate[k]) state.pendingPrivate[k] = state.pendingPrivate[k].filter((id) => id !== car.id);
+    }
+    car.status = 'cancelled';
+    car.cancelledAt = Date.now();
+    car.captainId = null; car.captainName = undefined; car.captainPlate = undefined;
+    if (req.account.activeCarId === car.id) req.account.activeCarId = null;
+    db.save();
+    broadcastCar(car);
+    if (nextCar) broadcastCar(nextCar);
+    return res.json({ cancelled: true, car });
+  }
+
+  // Shared car — only this customer's own seats are affected.
   const seats = req.body?.seats;
   if (!Array.isArray(seats)) return res.status(400).json({ error: 'Missing seats to release.' });
   releaseSeats(car, seats);
   car.bookings = (car.bookings || []).filter((b) => b.customerId !== req.account.id);
   if (req.account.activeCarId === car.id) req.account.activeCarId = null;
+
+  if (car.bookings.length === 0 && assignedCaptain) {
+    // Everyone in the car has now backed out — same treatment as a private
+    // cancellation: free the captain, close out the car.
+    const nextCar = releaseCaptainAndReassign();
+    car.status = 'cancelled';
+    car.cancelledAt = Date.now();
+    car.captainId = null; car.captainName = undefined; car.captainPlate = undefined;
+    db.save();
+    broadcastCar(car);
+    if (nextCar) broadcastCar(nextCar);
+    return res.json({ car });
+  }
+
+  // Other passengers remain (or no captain was ever assigned) — the car
+  // carries on as-is; if a captain is already attached, they keep driving
+  // the remaining group.
   db.save();
   broadcastCar(car);
   res.json({ car });
