@@ -19,7 +19,7 @@ const db = require('./db');
 const push = require('./push');
 const files = require('./files');
 const { hashPassword, checkPassword, makeAccountKit } = require('./auth');
-const { POINTS, DIRECTIONS, isValidDirection, directionLabel, fareFor, LINE_ORDER, FARE_TIERS } = require('./points');
+const { POINTS, DIRECTIONS, isValidDirection, directionLabel, fareFor, LINE_ORDER, FULL_CAR_PRICE, SEAT_RATE_PER_HOP } = require('./points');
 
 const state = db.state;
 state.cars = state.cars || {};
@@ -260,7 +260,7 @@ app.get('/api/fare', (req, res) => {
   res.json(out);
 });
 app.get('/api/fare-tiers', (req, res) => {
-  res.json({ lineOrder: LINE_ORDER, tiers: FARE_TIERS });
+  res.json({ lineOrder: LINE_ORDER, fullCarPrice: FULL_CAR_PRICE, seatRatePerHop: SEAT_RATE_PER_HOP });
 });
 app.get('/api/vacancies', (req, res) => {
   const { direction } = req.query;

@@ -45,13 +45,19 @@ function directionLabel(direction, useShort) {
   return `${from} → ${to}`;
 }
 
-// Fare by hop count. 1 hop = adjacent points, 2 hops = skip one point,
-// 3 hops = the full line end-to-end ("Direct", Uhud <-> Quba'a only).
-const FARE_TIERS = {
-  1: { sedan: { seat: 2, full: 8 },  family: { seat: 2, full: 14 }, minibus: { seat: 1, full: 14 } },
-  2: { sedan: { seat: 2, full: 15 }, family: { seat: 2, full: 21 }, minibus: { seat: 1, full: 25 } },
-  3: { sedan: { seat: 4, full: 15 }, family: { seat: 4, full: 24 }, minibus: { seat: 2, full: 25 } },
+// Whole-car (private booking) prices by hop count — unchanged from before,
+// these are set per tier, not computed from a formula.
+const FULL_CAR_PRICE = {
+  1: { sedan: 8,  family: 14, minibus: 14 },
+  2: { sedan: 15, family: 21, minibus: 25 },
+  3: { sedan: 15, family: 24, minibus: 25 },
 };
+
+// Per-seat price is a straight per-hop rate: 2 SAR/hop for sedan and family
+// car, 1 SAR/hop for minibus. Quba'a <-> Uhud (the full 3-hop line) is
+// 3 x 2 = 6 SAR by car, 3 x 1 = 3 SAR by minibus — unlike the whole-car
+// price, this genuinely scales with distance, no flat tiers.
+const SEAT_RATE_PER_HOP = { sedan: 2, family: 2, minibus: 1 };
 
 // Returns { seat, full } for a vehicle type on a given direction, or null if
 // the direction/vehicle combination doesn't have a defined fare.
@@ -59,9 +65,10 @@ function fareFor(vehicleType, direction) {
   const d = DIRECTIONS[direction];
   if (!d) return null;
   const hops = hopCount(d.from, d.to);
-  const tier = FARE_TIERS[hops];
-  if (!tier || !tier[vehicleType]) return null;
-  return tier[vehicleType];
+  const fullTier = FULL_CAR_PRICE[hops];
+  const perHop = SEAT_RATE_PER_HOP[vehicleType];
+  if (!hops || !fullTier || fullTier[vehicleType] === undefined || perHop === undefined) return null;
+  return { seat: hops * perHop, full: fullTier[vehicleType] };
 }
 
-module.exports = { POINTS, LINE_ORDER, DIRECTIONS, isValidDirection, directionLabel, hopCount, FARE_TIERS, fareFor };
+module.exports = { POINTS, LINE_ORDER, DIRECTIONS, isValidDirection, directionLabel, hopCount, FULL_CAR_PRICE, SEAT_RATE_PER_HOP, fareFor };
