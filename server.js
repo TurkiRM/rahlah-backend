@@ -300,6 +300,32 @@ app.get('/api/customer/me', customerAuth.requireAuth, (req, res) => {
   res.json({ customer: customerAuth.toPublic(req.account), car });
 });
 
+app.post('/api/customer/change-password', customerAuth.requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password are required.' });
+  if (newPassword.length < 4) return res.status(400).json({ error: 'New password is too short.' });
+  if (!checkPassword(currentPassword, req.account.passwordHash)) return res.status(401).json({ error: 'Current password is incorrect.' });
+  req.account.passwordHash = hashPassword(newPassword);
+  db.save();
+  res.json({ ok: true });
+});
+
+app.post('/api/customer/profile', customerAuth.requireAuth, (req, res) => {
+  const { name, phone } = req.body || {};
+  if (name !== undefined) {
+    if (!name.trim()) return res.status(400).json({ error: 'Name cannot be empty.' });
+    req.account.name = name.trim();
+  }
+  if (phone !== undefined && phone !== req.account.phone) {
+    if (!phone.trim()) return res.status(400).json({ error: 'Phone cannot be empty.' });
+    const existing = customerAuth.findByLogin(phone.trim());
+    if (existing && existing.id !== req.account.id) return res.status(409).json({ error: 'That phone number is already in use.' });
+    req.account.phone = phone.trim();
+  }
+  db.save();
+  res.json({ customer: customerAuth.toPublic(req.account) });
+});
+
 app.post('/api/book', customerAuth.requireAuth, (req, res) => {
   if (req.account.accountStatus === 'suspended') return res.status(403).json({ error: 'Your account has been suspended. Contact support.' });
   const { vehicleType, direction, party } = req.body || {};
@@ -504,6 +530,32 @@ app.get('/api/captain/me', captainAuth.requireAuth, (req, res) => {
   const car = captain.currentCarId ? state.cars[captain.currentCarId] : null;
   const offerCar = !car ? Object.values(state.cars).find((c) => c.pendingOffer && c.pendingOffer.captainId === captain.id) : null;
   res.json({ captain: captainAuth.toPublic(captain), car, offer: offerCar });
+});
+
+app.post('/api/captain/change-password', captainAuth.requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password are required.' });
+  if (newPassword.length < 4) return res.status(400).json({ error: 'New password is too short.' });
+  if (!checkPassword(currentPassword, req.account.passwordHash)) return res.status(401).json({ error: 'Current password is incorrect.' });
+  req.account.passwordHash = hashPassword(newPassword);
+  db.save();
+  res.json({ ok: true });
+});
+
+app.post('/api/captain/profile', captainAuth.requireAuth, (req, res) => {
+  const { name, phone } = req.body || {};
+  if (name !== undefined) {
+    if (!name.trim()) return res.status(400).json({ error: 'Name cannot be empty.' });
+    req.account.name = name.trim();
+  }
+  if (phone !== undefined && phone !== req.account.phone) {
+    if (!phone.trim()) return res.status(400).json({ error: 'Phone cannot be empty.' });
+    const existing = captainAuth.findByLogin(phone.trim());
+    if (existing && existing.id !== req.account.id) return res.status(409).json({ error: 'That phone number is already in use.' });
+    req.account.phone = phone.trim();
+  }
+  db.save();
+  res.json({ captain: captainAuth.toPublic(req.account) });
 });
 
 // Add a second (or third) vehicle type to an existing captain account. Their
@@ -890,6 +942,35 @@ app.post('/api/supervisor/customer/:id/reactivate', supervisorAuth.requireAuth, 
   customer.accountStatus = 'active';
   db.save();
   res.json({ customer: customerAuth.toPublic(customer) });
+});
+
+// Password reset without SMS/email infrastructure: a supervisor generates a
+// new temporary password and relays it to the person directly (phone call,
+// in person, etc.) — matches how this app already works as a small,
+// trust-based operation. The plaintext temp password is only ever returned
+// in this one response, to the supervisor who requested it; it's never
+// logged or stored anywhere. Whoever receives it should change it via
+// change-password on their next login.
+function generateTempPassword() {
+  return require('crypto').randomBytes(4).toString('hex'); // 8 hex chars, easy to read aloud
+}
+
+app.post('/api/supervisor/captain/:id/reset-password', supervisorAuth.requireAuth, (req, res) => {
+  const captain = state.captains[req.params.id];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  const tempPassword = generateTempPassword();
+  captain.passwordHash = hashPassword(tempPassword);
+  db.save();
+  res.json({ tempPassword });
+});
+
+app.post('/api/supervisor/customer/:id/reset-password', supervisorAuth.requireAuth, (req, res) => {
+  const customer = state.customers[req.params.id];
+  if (!customer) return res.status(404).json({ error: 'Customer not found.' });
+  const tempPassword = generateTempPassword();
+  customer.passwordHash = hashPassword(tempPassword);
+  db.save();
+  res.json({ tempPassword });
 });
 
 wss.on('connection', () => {});
