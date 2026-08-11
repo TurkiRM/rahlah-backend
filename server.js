@@ -36,14 +36,14 @@ const captainAuth = makeAccountKit({
     'id', 'phone', 'name',
     'vehicles', 'personalDocuments', 'personalDocumentsApproved', 'suspended',
     'vehicleType', 'currentPoint', 'status', 'currentCarId',
-    'earnings', 'tripHistory', 'location', 'createdAt',
+    'earnings', 'tripHistory', 'ratingsReceived', 'location', 'createdAt',
   ],
 });
 const customerAuth = makeAccountKit({
   accountsKey: 'customers',
   sessionsKey: 'customerSessions',
   loginField: 'phone',
-  publicFields: ['id', 'phone', 'name', 'gender', 'activeCarId', 'tripHistory', 'accountStatus', 'createdAt'],
+  publicFields: ['id', 'phone', 'name', 'gender', 'activeCarId', 'tripHistory', 'ratingsReceived', 'accountStatus', 'createdAt'],
 });
 const supervisorAuth = makeAccountKit({
   accountsKey: 'supervisors',
@@ -140,12 +140,22 @@ function claimForCaptain(captain) {
   return fullCar || null;
 }
 
+function ratingSummary(ratingsReceived) {
+  const arr = ratingsReceived || [];
+  if (!arr.length) return { avg: null, count: 0 };
+  const sum = arr.reduce((s, r) => s + r.stars, 0);
+  return { avg: Math.round((sum / arr.length) * 10) / 10, count: arr.length };
+}
+
 function assignCarToCaptain(car, captain) {
   const vehicle = captain.vehicles[car.vehicleType];
+  const rating = ratingSummary(captain.ratingsReceived);
   car.captainId = captain.id;
   car.captainName = captain.name;
   car.captainPlate = vehicle ? vehicle.plate : '—';
   car.captainPhone = captain.phone;
+  car.captainRatingAvg = rating.avg;
+  car.captainRatingCount = rating.count;
   car.status = 'ready';
   captain.currentCarId = car.id;
 }
@@ -279,7 +289,7 @@ app.post('/api/customer/register', (req, res) => {
   if (!['men', 'women'].includes(gender)) return res.status(400).json({ error: 'Gender must be specified.' });
   if (customerAuth.findByLogin(phone)) return res.status(409).json({ error: 'An account with this phone number already exists.' });
   const id = randomUUID();
-  const account = { id, phone, passwordHash: hashPassword(password), name, gender, activeCarId: null, tripHistory: [], accountStatus: 'active', createdAt: Date.now() };
+  const account = { id, phone, passwordHash: hashPassword(password), name, gender, activeCarId: null, tripHistory: [], ratingsReceived: [], accountStatus: 'active', createdAt: Date.now() };
   state.customers[id] = account;
   db.save();
   const token = customerAuth.createSession(id);
@@ -354,7 +364,8 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
 
   const mySeats = seatParty(car, genders);
   const myFare = genders.length * fare.seat;
-  car.bookings.push({ customerId: req.account.id, seats: mySeats, fare: myFare });
+  const rs = ratingSummary(req.account.ratingsReceived);
+  car.bookings.push({ customerId: req.account.id, name: req.account.name, phone: req.account.phone, ratingAvg: rs.avg, ratingCount: rs.count, seats: mySeats, fare: myFare });
   req.account.activeCarId = car.id;
 
   if (seatsFilled(car) === totalSeats(vehicleType) && !car.captainId) {
@@ -455,7 +466,8 @@ app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
   if (!fare) return res.status(400).json({ error: 'No fare is defined for this route yet.' });
 
   const car = newCar({ id: randomUUID(), vehicleType, direction, mode: 'private' });
-  car.bookings = [{ customerId: req.account.id, seats: 'ALL', fare: fare.full }];
+  const rs = ratingSummary(req.account.ratingsReceived);
+  car.bookings = [{ customerId: req.account.id, name: req.account.name, phone: req.account.phone, ratingAvg: rs.avg, ratingCount: rs.count, seats: 'ALL', fare: fare.full }];
   state.cars[car.id] = car;
   req.account.activeCarId = car.id;
 
@@ -508,7 +520,7 @@ app.post('/api/captain/register', (req, res) => {
     personalDocumentsApproved: false,
     suspended: false,
     vehicleType: null, currentPoint: null, status: 'offline', currentCarId: null,
-    earnings: 0, tripHistory: [], location: null, createdAt: Date.now(),
+    earnings: 0, tripHistory: [], ratingsReceived: [], location: null, createdAt: Date.now(),
   };
   state.captains[id] = account;
   db.save();
@@ -690,6 +702,46 @@ app.post('/api/captain/complete-trip', captainAuth.requireAuth, (req, res) => {
   db.save();
   if (nextCar) broadcastCar(nextCar);
   res.json({ trip: tripRecord, captain: captainAuth.toPublic(captain), car: nextCar || null });
+});
+
+// A captain rates one specific passenger from a completed trip. One rating
+// per (trip, passenger) pair — resubmitting just overwrites their previous
+// one rather than stacking duplicates.
+app.post('/api/captain/rate-customer', captainAuth.requireAuth, (req, res) => {
+  const { carId, customerId, stars, comment } = req.body || {};
+  const starsNum = parseInt(stars, 10);
+  if (!Number.isInteger(starsNum) || starsNum < 1 || starsNum > 5) return res.status(400).json({ error: 'Stars must be 1-5.' });
+  const car = state.cars[carId];
+  if (!car || car.status !== 'completed') return res.status(404).json({ error: 'Completed trip not found.' });
+  if (car.captainId !== req.account.id) return res.status(403).json({ error: "You weren't the captain on this trip." });
+  const wasPassenger = (car.bookings || []).some((b) => b.customerId === customerId);
+  if (!wasPassenger) return res.status(404).json({ error: "That passenger wasn't on this trip." });
+  const customer = state.customers[customerId];
+  if (!customer) return res.status(404).json({ error: 'Customer not found.' });
+  customer.ratingsReceived = customer.ratingsReceived || [];
+  customer.ratingsReceived = customer.ratingsReceived.filter((r) => r.tripId !== carId);
+  customer.ratingsReceived.push({ tripId: carId, stars: starsNum, comment: comment || null, fromName: req.account.name, createdAt: Date.now() });
+  db.save();
+  res.json({ ok: true });
+});
+
+// A customer rates the captain of a completed trip. One rating per trip —
+// resubmitting overwrites the previous one.
+app.post('/api/customer/rate-captain', customerAuth.requireAuth, (req, res) => {
+  const { carId, stars, comment } = req.body || {};
+  const starsNum = parseInt(stars, 10);
+  if (!Number.isInteger(starsNum) || starsNum < 1 || starsNum > 5) return res.status(400).json({ error: 'Stars must be 1-5.' });
+  const car = state.cars[carId];
+  if (!car || car.status !== 'completed') return res.status(404).json({ error: 'Completed trip not found.' });
+  const wasOnTrip = (car.bookings || []).some((b) => b.customerId === req.account.id);
+  if (!wasOnTrip) return res.status(403).json({ error: "You weren't on this trip." });
+  const captain = car.captainId ? state.captains[car.captainId] : null;
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  captain.ratingsReceived = captain.ratingsReceived || [];
+  captain.ratingsReceived = captain.ratingsReceived.filter((r) => !(r.tripId === carId && r.raterId === req.account.id));
+  captain.ratingsReceived.push({ tripId: carId, raterId: req.account.id, stars: starsNum, comment: comment || null, fromName: req.account.name, createdAt: Date.now() });
+  db.save();
+  res.json({ ok: true });
 });
 
 app.post('/api/captain/offline', captainAuth.requireAuth, (req, res) => {
@@ -1019,10 +1071,12 @@ function backfillLegacyAccounts() {
   Object.values(state.captains).forEach((cap) => {
     if (!cap.vehicles) { migrateLegacyCaptainToVehicles(cap); touched = true; }
     if (cap.location === undefined) { cap.location = null; touched = true; }
+    if (cap.ratingsReceived === undefined) { cap.ratingsReceived = []; touched = true; }
   });
   Object.values(state.customers).forEach((cust) => {
     if (cust.accountStatus === undefined) { cust.accountStatus = 'active'; touched = true; }
     if (cust.activeCarId === undefined) { cust.activeCarId = null; touched = true; }
+    if (cust.ratingsReceived === undefined) { cust.ratingsReceived = []; touched = true; }
   });
   if (touched) {
     console.log('Backfilled missing fields on one or more legacy accounts.');
