@@ -930,6 +930,26 @@ app.get('/api/supervisor/document/:captainId/:scope/:docType', async (req, res) 
   res.send(doc.data);
 });
 
+// Lets a customer see their captain's photo for visual ID confirmation before
+// getting in the car — a real safety feature, not cosmetic. Accessed via
+// <img src="..."> so, like the endpoint above, the session token travels as
+// a query param since img tags can't send an Authorization header.
+// Deliberately exposes ONLY the photo — license, vehicle registration,
+// insurance, and inspection stay restricted to the captain and supervisor,
+// same as before this feature existed.
+app.get('/api/customer/captain-photo/:captainId', async (req, res) => {
+  const account = customerAuth.validateSession(req.query.token || '');
+  if (!account) return res.status(401).json({ error: 'Not authenticated.' });
+  const captain = state.captains[req.params.captainId];
+  if (!captain) return res.status(404).json({ error: 'Captain not found.' });
+  const fileId = captain.personalDocuments && captain.personalDocuments.photo;
+  if (!fileId) return res.status(404).json({ error: 'No photo on file.' });
+  const doc = await files.getDocument(fileId);
+  if (!doc) return res.status(404).json({ error: 'File not found.' });
+  res.set('Content-Type', doc.mimeType);
+  res.send(doc.data);
+});
+
 app.post('/api/supervisor/captain/:id/vehicle/:vehicleType/approve', supervisorAuth.requireAuth, (req, res) => {
   const captain = state.captains[req.params.id];
   if (!captain) return res.status(404).json({ error: 'Captain not found.' });
