@@ -25,11 +25,13 @@ const state = db.state;
 state.cars = state.cars || {};
 state.trips = state.trips || [];
 state.pendingPrivate = state.pendingPrivate || {};
-// Supervisor-editable settings — deliberately NOT hardcoded into the
-// frontends, so things like the support contact number can change without
-// a redeploy. Starts with a sensible default; a supervisor can update it
-// from the dashboard at any time.
-state.settings = state.settings || { supportWhatsApp: '+966543116571' };
+// NOTE: state.settings is intentionally NOT initialized here. This file's
+// top-level code runs before Postgres data has loaded (see db.js — loading
+// deletes every existing key on `state` before copying in what's actually
+// saved), so any brand-new field set here gets wiped out the moment real
+// data loads if that field doesn't exist yet in the saved blob. New fields
+// belong in backfillLegacyAccounts() below, which correctly runs AFTER
+// `db.ready` resolves.
 
 /* ---------- accounts ---------- */
 
@@ -265,7 +267,7 @@ setInterval(() => {
 /* ---------- public routes ---------- */
 
 app.get('/api/vehicles', (req, res) => res.json(VEHICLES));
-app.get('/api/settings', (req, res) => res.json(state.settings));
+app.get('/api/settings', (req, res) => res.json(state.settings || {}));
 app.get('/api/points', (req, res) => res.json(POINTS));
 app.get('/api/directions', (req, res) => res.json(DIRECTIONS));
 app.get('/api/fare', (req, res) => {
@@ -881,6 +883,7 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
 });
 
 app.post('/api/supervisor/settings', supervisorAuth.requireAuth, (req, res) => {
+  state.settings = state.settings || {}; // defensive — should always exist by the time traffic is served, but never crash if not
   const { supportWhatsApp } = req.body || {};
   if (supportWhatsApp !== undefined) state.settings.supportWhatsApp = supportWhatsApp.trim();
   db.save();
@@ -1102,6 +1105,7 @@ function migrateLegacyCaptainToVehicles(cap) {
 // a review they were never asked for.
 function backfillLegacyAccounts() {
   let touched = false;
+  if (!state.settings) { state.settings = { supportWhatsApp: '+966543116571' }; touched = true; }
   Object.values(state.captains).forEach((cap) => {
     if (!cap.vehicles) { migrateLegacyCaptainToVehicles(cap); touched = true; }
     if (cap.location === undefined) { cap.location = null; touched = true; }
