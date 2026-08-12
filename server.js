@@ -25,6 +25,11 @@ const state = db.state;
 state.cars = state.cars || {};
 state.trips = state.trips || [];
 state.pendingPrivate = state.pendingPrivate || {};
+// Supervisor-editable settings — deliberately NOT hardcoded into the
+// frontends, so things like the support contact number can change without
+// a redeploy. Starts with a sensible default; a supervisor can update it
+// from the dashboard at any time.
+state.settings = state.settings || { supportWhatsApp: '+966543116571' };
 
 /* ---------- accounts ---------- */
 
@@ -260,6 +265,7 @@ setInterval(() => {
 /* ---------- public routes ---------- */
 
 app.get('/api/vehicles', (req, res) => res.json(VEHICLES));
+app.get('/api/settings', (req, res) => res.json(state.settings));
 app.get('/api/points', (req, res) => res.json(POINTS));
 app.get('/api/directions', (req, res) => res.json(DIRECTIONS));
 app.get('/api/fare', (req, res) => {
@@ -870,7 +876,15 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
     trips: state.trips.slice(0, 100),
     pendingPrivate: state.pendingPrivate,
     pushSubscriberCount: Object.keys(state.pushSubs || {}).length,
+    settings: state.settings,
   });
+});
+
+app.post('/api/supervisor/settings', supervisorAuth.requireAuth, (req, res) => {
+  const { supportWhatsApp } = req.body || {};
+  if (supportWhatsApp !== undefined) state.settings.supportWhatsApp = supportWhatsApp.trim();
+  db.save();
+  res.json({ settings: state.settings });
 });
 
 // Manual override for a stuck car — a supervisor can hand-assign any currently
