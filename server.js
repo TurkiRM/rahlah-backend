@@ -868,6 +868,39 @@ app.post('/api/supervisor/login', (req, res) => {
   res.json({ token, supervisor: supervisorAuth.toPublic(account) });
 });
 
+// Adding a supervisor account is itself a supervisor-only action — there's no
+// public sign-up for this role, on purpose. Any existing supervisor can add
+// another; the person creating it is trusting their own judgment about who
+// else should have this level of access, same as approving a captain.
+app.post('/api/supervisor/supervisors', supervisorAuth.requireAuth, (req, res) => {
+  const { username, password, name } = req.body || {};
+  if (!username || !password || !name) return res.status(400).json({ error: 'Username, password, and name are required.' });
+  if (password.length < 4) return res.status(400).json({ error: 'Password is too short.' });
+  if (supervisorAuth.findByLogin(username)) return res.status(409).json({ error: 'That username is already taken.' });
+  const id = randomUUID();
+  const account = { id, username, name, passwordHash: hashPassword(password), createdAt: Date.now() };
+  state.supervisors[id] = account;
+  db.save();
+  res.json({ supervisor: supervisorAuth.toPublic(account) });
+});
+
+// Two safety rails: can't remove yourself (avoid accidentally locking
+// yourself out mid-session), and can't remove the last remaining supervisor
+// (avoid locking EVERYONE out of the dashboard permanently, with no bootstrap
+// path back in short of touching the database directly).
+app.post('/api/supervisor/supervisors/:id/remove', supervisorAuth.requireAuth, (req, res) => {
+  if (req.params.id === req.account.id) return res.status(400).json({ error: "You can't remove your own account." });
+  if (!state.supervisors[req.params.id]) return res.status(404).json({ error: 'Supervisor not found.' });
+  if (Object.keys(state.supervisors).length <= 1) return res.status(400).json({ error: "Can't remove the last remaining supervisor account." });
+  delete state.supervisors[req.params.id];
+  // Also kill any active sessions for the removed account so access ends immediately.
+  Object.keys(state.supervisorSessions).forEach((token) => {
+    if (state.supervisorSessions[token].accountId === req.params.id) delete state.supervisorSessions[token];
+  });
+  db.save();
+  res.json({ ok: true });
+});
+
 app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
   res.json({
     now: Date.now(),
@@ -879,6 +912,8 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
     pendingPrivate: state.pendingPrivate,
     pushSubscriberCount: Object.keys(state.pushSubs || {}).length,
     settings: state.settings,
+    supervisors: Object.values(state.supervisors).map(supervisorAuth.toPublic),
+    myId: req.account.id, // lets the dashboard know which row is "you" — you can't remove yourself
   });
 });
 
