@@ -1099,6 +1099,33 @@ app.post('/api/supervisor/customer/:id/reset-password', supervisorAuth.requireAu
   res.json({ tempPassword });
 });
 
+// Resetting another SUPERVISOR's password is account-takeover-equivalent —
+// whoever holds the new temp password can immediately log in as that person
+// with full supervisor access. Same restriction as adding/removing
+// supervisors, for the same reason: root-only, not any-supervisor-on-any-other.
+app.post('/api/supervisor/supervisors/:id/reset-password', supervisorAuth.requireAuth, (req, res) => {
+  if (!req.account.isRoot) return res.status(403).json({ error: 'Only the main supervisor account can reset another supervisor\'s password.' });
+  const target = state.supervisors[req.params.id];
+  if (!target) return res.status(404).json({ error: 'Supervisor not found.' });
+  const tempPassword = generateTempPassword();
+  target.passwordHash = hashPassword(tempPassword);
+  db.save();
+  res.json({ tempPassword });
+});
+
+// Self-service — any supervisor (root or not) can change their OWN password
+// once logged in, same pattern as captain/customer change-password. This is
+// how someone who was just handed a temp password by root sets their own.
+app.post('/api/supervisor/change-password', supervisorAuth.requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password are required.' });
+  if (newPassword.length < 4) return res.status(400).json({ error: 'New password is too short.' });
+  if (!checkPassword(currentPassword, req.account.passwordHash)) return res.status(401).json({ error: 'Current password is incorrect.' });
+  req.account.passwordHash = hashPassword(newPassword);
+  db.save();
+  res.json({ ok: true });
+});
+
 wss.on('connection', () => {});
 
 const PORT = process.env.PORT || 3000;
