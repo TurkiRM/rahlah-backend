@@ -25,13 +25,18 @@ const HUBS = ['A', 'B', 'C', 'E'];
 // there are few of them and their real distances from each other don't
 // reduce to a simple formula. (1 = near, 2 = medium, 3 = far — same tiers
 // spokes use below.)
+//
+// B, C, and E are all "arrived at Nabawi" points — different access points
+// around the same mosque, not separate destinations. A shared-car trip
+// between two of them (a short walk around the same complex) doesn't make
+// sense the way a Quba'a<->Nabawi-side trip (a genuine trip between two
+// separate mosques) does. B-C is kept as an established route; E
+// deliberately only connects hub-to-hub with A, not with B or C.
 const HUB_HUB_TIER = {
   'A-B': 1,
   'A-C': 2,
   'B-C': 1,
   'A-E': 1,
-  'B-E': 1,
-  'C-E': 2,
 };
 
 // Each spoke lists which hub(s) it connects to and the fare tier for each —
