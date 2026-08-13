@@ -6,26 +6,31 @@ const POINTS = {
   C: { full: 'Northern Central Region', short: 'Northern Central', lat: 24.474044564082376, lng: 39.61013880510328 },
   B: { full: 'Masjed Al-Ghamama', short: 'Al-Ghamama', lat: 24.44022821877946, lng: 39.61848679439748 },
   A: { full: "Masjed Quba'a", short: "Quba'a", lat: 24.465132784426007, lng: 39.607854517856794 },
+  E: { full: 'Assalam Road', short: 'Assalam Road', lat: 24.467436017577214, lng: 39.604307696237136 },
 };
 
 // Hub-and-spoke, not one shared line. A "hub" is a point that represents
 // arriving at one of the two mosques — Quba'a is A; Masjid an-Nabawi is
-// represented by both B (Al-Ghamama) and C (Northern Central), two different
-// access points near it rather than one canonical point. Every OTHER point
-// is a "spoke" — a neighborhood or pickup area that only connects to
-// whichever hub(s) it actually serves. There is deliberately no
+// represented by three different access points around it rather than one
+// canonical point: B (Al-Ghamama, Southern Central Region), C (Northern
+// Central Region), and E (Assalam Road, Western Central Region). Every
+// OTHER point is a "spoke" — a neighborhood or pickup area that only
+// connects to whichever hub(s) it actually serves. There is deliberately no
 // spoke-to-spoke booking (e.g. one neighborhood directly to another) — this
 // app moves people to and from the mosques, not between arbitrary points.
-const HUBS = ['A', 'B', 'C'];
+const HUBS = ['A', 'B', 'C', 'E'];
 
-// Fare tier between the three hub points themselves — fixed per pair, since
-// there are only three of them and their real distances from each other
-// don't reduce to a simple formula. (1 = near, 2 = medium, 3 = far — same
-// tiers spokes use below.)
+// Fare tier between the hub points themselves — fixed per pair, since
+// there are few of them and their real distances from each other don't
+// reduce to a simple formula. (1 = near, 2 = medium, 3 = far — same tiers
+// spokes use below.)
 const HUB_HUB_TIER = {
   'A-B': 1,
   'A-C': 2,
   'B-C': 1,
+  'A-E': 1,
+  'B-E': 1,
+  'C-E': 2,
 };
 
 // Each spoke lists which hub(s) it connects to and the fare tier for each —
