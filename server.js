@@ -56,7 +56,7 @@ const supervisorAuth = makeAccountKit({
   accountsKey: 'supervisors',
   sessionsKey: 'supervisorSessions',
   loginField: 'username',
-  publicFields: ['id', 'username', 'name', 'createdAt'],
+  publicFields: ['id', 'username', 'name', 'isRoot', 'createdAt'],
 });
 
 // Bootstrap exactly one supervisor account on first run — there's no sign-up
@@ -70,7 +70,7 @@ function bootstrapSupervisorIfNeeded() {
     const username = process.env.SUPERVISOR_USERNAME || 'admin';
     const password = process.env.SUPERVISOR_PASSWORD || require('crypto').randomBytes(6).toString('hex');
     const id = randomUUID();
-    state.supervisors[id] = { id, username, name: 'Supervisor', passwordHash: hashPassword(password), createdAt: Date.now() };
+    state.supervisors[id] = { id, username, name: 'Supervisor', passwordHash: hashPassword(password), isRoot: true, createdAt: Date.now() };
     db.save();
     console.log(`Bootstrapped a supervisor account — username: ${username}  password: ${password}`);
     console.log('(set SUPERVISOR_USERNAME / SUPERVISOR_PASSWORD env vars to control these instead)');
@@ -869,26 +869,27 @@ app.post('/api/supervisor/login', (req, res) => {
 });
 
 // Adding a supervisor account is itself a supervisor-only action — there's no
-// public sign-up for this role, on purpose. Any existing supervisor can add
-// another; the person creating it is trusting their own judgment about who
-// else should have this level of access, same as approving a captain.
+// public sign-up for this role, on purpose. Restricted to the ROOT supervisor
+// specifically (not any supervisor), and new accounts are never root
+// themselves — otherwise a newly-added supervisor could add or remove
+// others just as freely, including the person who created them.
 app.post('/api/supervisor/supervisors', supervisorAuth.requireAuth, (req, res) => {
+  if (!req.account.isRoot) return res.status(403).json({ error: 'Only the main supervisor account can add or remove supervisors.' });
   const { username, password, name } = req.body || {};
   if (!username || !password || !name) return res.status(400).json({ error: 'Username, password, and name are required.' });
   if (password.length < 4) return res.status(400).json({ error: 'Password is too short.' });
   if (supervisorAuth.findByLogin(username)) return res.status(409).json({ error: 'That username is already taken.' });
   const id = randomUUID();
-  const account = { id, username, name, passwordHash: hashPassword(password), createdAt: Date.now() };
+  const account = { id, username, name, passwordHash: hashPassword(password), isRoot: false, createdAt: Date.now() };
   state.supervisors[id] = account;
   db.save();
   res.json({ supervisor: supervisorAuth.toPublic(account) });
 });
 
-// Two safety rails: can't remove yourself (avoid accidentally locking
-// yourself out mid-session), and can't remove the last remaining supervisor
-// (avoid locking EVERYONE out of the dashboard permanently, with no bootstrap
-// path back in short of touching the database directly).
+// Same restriction as above, plus the same two safety rails as before: can't
+// remove yourself, can't remove the last remaining supervisor.
 app.post('/api/supervisor/supervisors/:id/remove', supervisorAuth.requireAuth, (req, res) => {
+  if (!req.account.isRoot) return res.status(403).json({ error: 'Only the main supervisor account can add or remove supervisors.' });
   if (req.params.id === req.account.id) return res.status(400).json({ error: "You can't remove your own account." });
   if (!state.supervisors[req.params.id]) return res.status(404).json({ error: 'Supervisor not found.' });
   if (Object.keys(state.supervisors).length <= 1) return res.status(400).json({ error: "Can't remove the last remaining supervisor account." });
@@ -914,6 +915,7 @@ app.get('/api/supervisor/overview', supervisorAuth.requireAuth, (req, res) => {
     settings: state.settings,
     supervisors: Object.values(state.supervisors).map(supervisorAuth.toPublic),
     myId: req.account.id, // lets the dashboard know which row is "you" — you can't remove yourself
+    amIRoot: req.account.isRoot === true, // only the root supervisor can add/remove supervisor accounts
   });
 });
 
@@ -1141,6 +1143,16 @@ function migrateLegacyCaptainToVehicles(cap) {
 function backfillLegacyAccounts() {
   let touched = false;
   if (!state.settings) { state.settings = { supportWhatsApp: '+966543116571' }; touched = true; }
+  // Deliberately safe default: an existing supervisor account with no isRoot
+  // field gets explicitly set to false, never true. Guessing which one
+  // "should" be root would risk handing that power right back to whichever
+  // account happens to still exist — including one that shouldn't have it.
+  Object.values(state.supervisors).forEach((sup) => {
+    if (sup.isRoot === undefined) { sup.isRoot = false; touched = true; }
+  });
+  if (!Object.values(state.supervisors).some((sup) => sup.isRoot)) {
+    console.log('WARNING: no supervisor account is marked as root — nobody can add or remove supervisor accounts through the app. This needs fixing directly in the database.');
+  }
   Object.values(state.captains).forEach((cap) => {
     if (!cap.vehicles) { migrateLegacyCaptainToVehicles(cap); touched = true; }
     if (cap.location === undefined) { cap.location = null; touched = true; }
