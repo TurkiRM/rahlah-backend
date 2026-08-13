@@ -7,6 +7,7 @@ const POINTS = {
   B: { full: 'Masjed Al-Ghamama', short: 'Al-Ghamama', lat: 24.44022821877946, lng: 39.61848679439748 },
   A: { full: "Masjed Quba'a", short: "Quba'a", lat: 24.465132784426007, lng: 39.607854517856794 },
   E: { full: 'Assalam Road', short: 'Assalam Road', lat: 24.467436017577214, lng: 39.604307696237136 },
+  F: { full: 'Islamic University', short: 'Islamic Univ.', lat: 24.475763146496593, lng: 39.56653414670136 },
 };
 
 // Hub-and-spoke, not one shared line. A "hub" is a point that represents
@@ -40,6 +41,7 @@ const HUB_HUB_TIER = {
 // same fares as before, just no longer expressed as hop-count along a line.
 const SPOKES = {
   D: { A: 3, B: 2, C: 1 }, // Uhud: far from Quba'a, medium from Al-Ghamama, near Northern Central
+  F: { A: 1, B: 1, C: 1, E: 1 }, // Islamic University: near every hub — a fast road connects it despite the straight-line distance looking longer
 };
 
 function isHub(id) {
