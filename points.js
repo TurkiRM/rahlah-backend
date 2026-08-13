@@ -1,6 +1,6 @@
-// Route points, laid out as a line — Uhud is one end, Quba'a is the other.
-// `full` is for headers/labels with room to breathe; `short` is for compact
-// spots (buttons, table cells). `lat`/`lng` are real coordinates.
+// Route points. `full` is for headers/labels with room to breathe; `short`
+// is for compact spots (buttons, table cells). `lat`/`lng` are real
+// coordinates.
 const POINTS = {
   D: { full: 'Uhud', short: 'Uhud', lat: 24.50297555232552, lng: 39.61368069684083 },
   C: { full: 'Northern Central Region', short: 'Northern Central', lat: 24.474044564082376, lng: 39.61013880510328 },
@@ -8,27 +8,65 @@ const POINTS = {
   A: { full: "Masjed Quba'a", short: "Quba'a", lat: 24.465132784426007, lng: 39.607854517856794 },
 };
 
-// The physical order of the line, end to end: Uhud -> Northern Central ->
-// Al-Ghamama -> Quba'a. Fare depends on how many hops apart two points are
-// along this line, not on which specific pair it is — Northern Central to
-// Quba'a (2 hops) costs the same as Uhud to Al-Ghamama (also 2 hops).
-const LINE_ORDER = ['D', 'C', 'B', 'A'];
+// Hub-and-spoke, not one shared line. A "hub" is a point that represents
+// arriving at one of the two mosques — Quba'a is A; Masjid an-Nabawi is
+// represented by both B (Al-Ghamama) and C (Northern Central), two different
+// access points near it rather than one canonical point. Every OTHER point
+// is a "spoke" — a neighborhood or pickup area that only connects to
+// whichever hub(s) it actually serves. There is deliberately no
+// spoke-to-spoke booking (e.g. one neighborhood directly to another) — this
+// app moves people to and from the mosques, not between arbitrary points.
+const HUBS = ['A', 'B', 'C'];
 
-function hopCount(fromId, toId) {
-  const i = LINE_ORDER.indexOf(fromId);
-  const j = LINE_ORDER.indexOf(toId);
-  if (i === -1 || j === -1) return null;
-  return Math.abs(i - j);
+// Fare tier between the three hub points themselves — fixed per pair, since
+// there are only three of them and their real distances from each other
+// don't reduce to a simple formula. (1 = near, 2 = medium, 3 = far — same
+// tiers spokes use below.)
+const HUB_HUB_TIER = {
+  'A-B': 1,
+  'A-C': 2,
+  'B-C': 1,
+};
+
+// Each spoke lists which hub(s) it connects to and the fare tier for each —
+// a spoke can be genuinely different distances from different hubs, so this
+// is per (spoke, hub) pair, not one single "distance" per spoke. Uhud's
+// tiers below are carried over unchanged from the old single-line model —
+// same fares as before, just no longer expressed as hop-count along a line.
+const SPOKES = {
+  D: { A: 3, B: 2, C: 1 }, // Uhud: far from Quba'a, medium from Al-Ghamama, near Northern Central
+};
+
+function isHub(id) {
+  return HUBS.includes(id);
 }
 
-// Every ordered pair of distinct points is a valid bookable route — you can
-// go directly from any point to any other, you're just charged by distance.
-// With 4 points that's 12 directions (D_TO_C, C_TO_D, D_TO_B, B_TO_D, ...).
+// Tier (1/2/3) between any two valid, connected points — hub-hub (fixed
+// pair) or hub-spoke (looked up from that spoke's own tier list). Returns
+// null for anything not actually connected: two different spokes, a point
+// spoken of that doesn't exist, or a spoke that doesn't reach that hub.
+function tierFor(pointA, pointB) {
+  if (pointA === pointB) return null;
+  if (isHub(pointA) && isHub(pointB)) {
+    const key = [pointA, pointB].sort().join('-');
+    return HUB_HUB_TIER[key] ?? null;
+  }
+  const hub = isHub(pointA) ? pointA : (isHub(pointB) ? pointB : null);
+  if (!hub) return null; // neither is a hub — not a valid route
+  const spoke = hub === pointA ? pointB : pointA;
+  if (isHub(spoke)) return null; // shouldn't happen given the branch above, but stay safe
+  const spokeTiers = SPOKES[spoke];
+  return spokeTiers ? (spokeTiers[hub] ?? null) : null;
+}
+
+// Every ordered pair of points that actually has a defined tier is a valid
+// bookable direction — hub-to-hub and hub-to-spoke, never spoke-to-spoke.
 const DIRECTIONS = {};
 const POINT_IDS = Object.keys(POINTS);
 POINT_IDS.forEach((from) => {
   POINT_IDS.forEach((to) => {
     if (from === to) return;
+    if (tierFor(from, to) === null) return;
     DIRECTIONS[`${from}_TO_${to}`] = { from, to };
   });
 });
@@ -45,30 +83,31 @@ function directionLabel(direction, useShort) {
   return `${from} → ${to}`;
 }
 
-// Whole-car (private booking) prices by hop count — unchanged from before,
-// these are set per tier, not computed from a formula.
+// Whole-car (private booking) prices by tier — set per tier, not computed
+// from a formula, unchanged from before.
 const FULL_CAR_PRICE = {
   1: { sedan: 8,  family: 14, minibus: 14 },
   2: { sedan: 15, family: 21, minibus: 25 },
   3: { sedan: 15, family: 24, minibus: 25 },
 };
 
-// Per-seat price is a straight per-hop rate: 2 SAR/hop for sedan and family
-// car, 1 SAR/hop for minibus. Quba'a <-> Uhud (the full 3-hop line) is
-// 3 x 2 = 6 SAR by car, 3 x 1 = 3 SAR by minibus — unlike the whole-car
-// price, this genuinely scales with distance, no flat tiers.
-const SEAT_RATE_PER_HOP = { sedan: 2, family: 2, minibus: 1 };
+// Per-seat price is a straight per-tier rate: 2 SAR/tier for sedan and
+// family car, 1 SAR/tier for minibus — unchanged from before.
+const SEAT_RATE_PER_TIER = { sedan: 2, family: 2, minibus: 1 };
 
 // Returns { seat, full } for a vehicle type on a given direction, or null if
 // the direction/vehicle combination doesn't have a defined fare.
 function fareFor(vehicleType, direction) {
   const d = DIRECTIONS[direction];
   if (!d) return null;
-  const hops = hopCount(d.from, d.to);
-  const fullTier = FULL_CAR_PRICE[hops];
-  const perHop = SEAT_RATE_PER_HOP[vehicleType];
-  if (!hops || !fullTier || fullTier[vehicleType] === undefined || perHop === undefined) return null;
-  return { seat: hops * perHop, full: fullTier[vehicleType] };
+  const tier = tierFor(d.from, d.to);
+  const fullTier = FULL_CAR_PRICE[tier];
+  const perTier = SEAT_RATE_PER_TIER[vehicleType];
+  if (!tier || !fullTier || fullTier[vehicleType] === undefined || perTier === undefined) return null;
+  return { seat: tier * perTier, full: fullTier[vehicleType] };
 }
 
-module.exports = { POINTS, LINE_ORDER, DIRECTIONS, isValidDirection, directionLabel, hopCount, FULL_CAR_PRICE, SEAT_RATE_PER_HOP, fareFor };
+module.exports = {
+  POINTS, HUBS, SPOKES, DIRECTIONS, isValidDirection, directionLabel, isHub, tierFor,
+  FULL_CAR_PRICE, SEAT_RATE_PER_TIER, fareFor,
+};
