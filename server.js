@@ -655,6 +655,7 @@ app.post('/api/captain/start-trip', captainAuth.requireAuth, (req, res) => {
   if (!car) return res.status(404).json({ error: 'No active car for this captain.' });
   car.status = 'in_trip';
   car.startedAt = Date.now();
+  car.track = []; // accumulates in memory as GPS pings arrive during the trip — see /api/captain/location
   db.save();
   broadcastCar(car);
   res.json({ car });
@@ -752,6 +753,30 @@ app.post('/api/customer/rate-captain', customerAuth.requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Trip route history — the actual path driven, for safety/accountability.
+// Each role gets the same track array, gated by whether they were actually
+// involved in that specific trip (captain drove it, or customer rode in
+// it) — a supervisor can view any trip's track, same reasoning as why they
+// can already see full passenger/captain identity on any completed trip.
+app.get('/api/customer/trip/:carId/track', customerAuth.requireAuth, (req, res) => {
+  const car = state.cars[req.params.carId];
+  if (!car) return res.status(404).json({ error: 'Trip not found.' });
+  const wasOnTrip = (car.bookings || []).some((b) => b.customerId === req.account.id);
+  if (!wasOnTrip) return res.status(403).json({ error: "You weren't on this trip." });
+  res.json({ track: car.track || [] });
+});
+app.get('/api/captain/trip/:carId/track', captainAuth.requireAuth, (req, res) => {
+  const car = state.cars[req.params.carId];
+  if (!car) return res.status(404).json({ error: 'Trip not found.' });
+  if (car.captainId !== req.account.id) return res.status(403).json({ error: "You weren't the captain on this trip." });
+  res.json({ track: car.track || [] });
+});
+app.get('/api/supervisor/trip/:carId/track', supervisorAuth.requireAuth, (req, res) => {
+  const car = state.cars[req.params.carId];
+  if (!car) return res.status(404).json({ error: 'Trip not found.' });
+  res.json({ track: car.track || [] });
+});
+
 app.post('/api/captain/offline', captainAuth.requireAuth, (req, res) => {
   const captain = req.account;
   const car = captain.currentCarId ? state.cars[captain.currentCarId] : null;
@@ -830,18 +855,27 @@ app.get('/api/captain/document/:scope/:docType', captainAuth.requireAuth, async 
   res.send(doc.data);
 });
 
+const MAX_TRACK_POINTS = 500; // defensive cap against a pathologically long trip — oldest points drop, not the whole track
+
 app.post('/api/captain/location', captainAuth.requireAuth, (req, res) => {
   const { lat, lng } = req.body || {};
   if (typeof lat !== 'number' || typeof lng !== 'number') return res.status(400).json({ error: 'lat and lng (numbers) are required.' });
   const captain = req.account;
   captain.location = { lat, lng, updatedAt: Date.now() };
-  // Deliberately NOT calling db.save() here — GPS pings arrive every few
-  // seconds per active captain, and this data is fine to lose on a restart
-  // (the next ping repopulates it within seconds). Persisting every single
-  // ping to Postgres would be pure write amplification for no real benefit.
+  // Deliberately NOT calling db.save() here for the live location itself —
+  // GPS pings arrive every few seconds per active captain, and losing the
+  // very latest ping on a restart is harmless (the next one repopulates it
+  // within seconds). The accumulated TRACK below rides along in memory and
+  // gets persisted for free at the next db.save() that already happens
+  // anyway (trip completion) — no extra database writes added for this.
   const car = captain.currentCarId ? state.cars[captain.currentCarId] : null;
   if (car) {
     car.captainLocation = captain.location;
+    if (car.status === 'in_trip') {
+      car.track = car.track || [];
+      car.track.push({ lat, lng, t: Date.now() });
+      if (car.track.length > MAX_TRACK_POINTS) car.track.shift();
+    }
     broadcastCar(car);
   }
   res.json({ ok: true });
