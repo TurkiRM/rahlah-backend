@@ -81,7 +81,7 @@ const app = express();
 app.use(cors({ origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()) : true }));
 app.use(express.json());
 
-app.get('/', (req, res) => res.json({ name: 'Rahlah API', status: 'ok' }));
+app.get('/', (req, res) => res.json({ name: 'معاً API', status: 'ok' }));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -257,7 +257,7 @@ setInterval(() => {
       touched = true;
       notifyCaptainsFor(car.vehicleType, car.direction, {
         title: `${filled} passengers waiting for a ${VEHICLES[car.vehicleType].name}`,
-        body: `No captain is online for this route right now — open Rahlah if you can take a partial car.`,
+        body: `No captain is online for this route right now — open معاً if you can take a partial car.`,
       });
     }
   });
@@ -384,7 +384,7 @@ app.post('/api/book', customerAuth.requireAuth, (req, res) => {
       car.notifiedFull = true;
       notifyCaptainsFor(vehicleType, direction, {
         title: `A full ${VEHICLES[vehicleType].name} is ready`,
-        body: `${totalSeats(vehicleType)} passengers are waiting at the pickup zone — open Rahlah to accept.`,
+        body: `${totalSeats(vehicleType)} passengers are waiting at the pickup zone — open معاً to accept.`,
       });
     }
   }
@@ -489,7 +489,7 @@ app.post('/api/book-private', customerAuth.requireAuth, (req, res) => {
     state.pendingPrivate[k].push(car.id);
     notifyCaptainsFor(vehicleType, direction, {
       title: `A private ${VEHICLES[vehicleType].name} booking is waiting`,
-      body: `Someone booked the whole car for ${fare.full} SAR — open Rahlah to accept.`,
+      body: `Someone booked the whole car for ${fare.full} SAR — open معاً to accept.`,
     });
   }
 
